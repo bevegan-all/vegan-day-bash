@@ -1,0 +1,39 @@
+{
+  "name": "vegan-day-bash",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:test": "vite --mode isolated --port 5180 --host 127.0.0.1",
+    "db:migrate:test": "wrangler d1 migrations apply vdb --local --persist-to .wrangler/test-state",
+    "build": "npm run typecheck && vite build",
+    "typecheck": "tsc -p tsconfig.web.json && tsc -p tsconfig.worker.json",
+    "db:migrate:local": "wrangler d1 migrations apply vdb --local",
+    "db:migrate:remote": "wrangler d1 migrations apply vdb --remote",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "hono": "^4.13.13",
+    "lucide-react": "^1.61.0",
+    "qr-scanner": "^1.4.2",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.65.0",
+    "@cloudflare/workers-types": "^5.20261024.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "wrangler": "^4.152.0"
+  }
+}

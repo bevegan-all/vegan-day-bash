@@ -1,0 +1,712 @@
+import { Hono } from "hono";
+import {
+  HttpError,
+  audit,
+  generatePassword,
+  getSettings,
+  hashPassword,
+  now,
+  parseQrCode,
+  qrCodeFor,
+  randomToken,
+  type AppEnv,
+  type Ctx,
+  type Env,
+  type User,
+} from "./lib";
+import { createUser, newLoginLink } from "./users";
+import { buildGameDetail, pitchTally } from "./games";
+import { notifyNewPlayers, notifyRemoved } from "./notify";
+
+export const adminRoutes = new Hono<AppEnv>();
+
+adminRoutes.use("*", async (c, next) => {
+  const u = c.get("user");
+  if (!u) throw new HttpError(401, "Not signed in");
+  if (u.role === "participant") throw new HttpError(403, "Organisers only");
+  await next();
+});
+
+const me = (c: Ctx) => c.get("user") as User;
+const requireAdmin = (c: Ctx) => {
+  if (me(c).role !== "admin") throw new HttpError(403, "Admins only");
+};
+const origin = (c: Ctx) => new URL(c.req.url).origin;
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+async function voidRef(env: Env, ref: string) {
+  await env.DB.prepare("UPDATE team_points SET voided_at = ? WHERE ref = ? AND voided_at IS NULL").bind(now(), ref).run();
+}
+
+function addPoints(env: Env, gameId: number, teamId: number, points: number, reason: string, ref: string, by: number) {
+  return env.DB.prepare(
+    "INSERT INTO team_points (game_id, team_id, points, reason, ref, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).bind(gameId, teamId, points, reason, ref, by, now());
+}
+
+// ---------- People ----------
+
+adminRoutes.post("/users", async (c) => {
+  const body = await c.req.json<{ name?: string; role?: User["role"]; partyId?: string; teamId?: number }>();
+  const role = body.role ?? "participant";
+  if (role !== "participant") requireAdmin(c);
+  const created = await createUser(
+    c.env,
+    { name: String(body.name ?? ""), role, partyId: body.partyId ?? null, teamId: body.teamId ?? null },
+    origin(c),
+  );
+  const team = await c.env.DB.prepare("SELECT id, name, emoji, color FROM teams WHERE id = ?").bind(created.user.team_id).first();
+  await audit(c.env, me(c).id, "user.create", { id: created.user.id, name: created.user.display_name, team: created.user.team_id });
+  return c.json({
+    id: created.user.id,
+    name: created.user.display_name,
+    username: created.user.username,
+    password: created.password,
+    team,
+    link: created.link,
+  });
+});
+
+adminRoutes.get("/users", async (c) => {
+  const q = (c.req.query("q") ?? "").trim().toLowerCase();
+  const team = Number(c.req.query("team") ?? 0);
+  const where: string[] = [];
+  const args: (string | number)[] = [];
+  if (q) {
+    where.push("(lower(u.display_name) LIKE ? OR u.username LIKE ?)");
+    args.push(`%${q}%`, `%${q}%`);
+  }
+  if (team) {
+    where.push("u.team_id = ?");
+    args.push(team);
+  }
+  const { results } = await c.env.DB.prepare(
+    `SELECT u.id, u.display_name AS name, u.username, u.role, u.team_id AS teamId, u.checked_in AS checkedIn
+       FROM users u ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      ORDER BY u.id DESC LIMIT 300`,
+  )
+    .bind(...args)
+    .all();
+  const stats = await c.env.DB.prepare(
+    "SELECT team_id AS teamId, COUNT(*) AS members, SUM(checked_in) AS checkedIn FROM users GROUP BY team_id",
+  ).all();
+  return c.json({ users: results, stats: stats.results });
+});
+
+async function userCard(c: Ctx, id: number) {
+  const u = await c.env.DB.prepare(
+    `SELECT u.id, u.display_name AS name, u.username, u.role, u.team_id AS teamId, u.checked_in AS checkedIn,
+            t.name AS teamName, t.emoji, t.color
+       FROM users u LEFT JOIN teams t ON t.id = u.team_id WHERE u.id = ?`,
+  )
+    .bind(id)
+    .first<Record<string, unknown>>();
+  if (!u) throw new HttpError(404, "No such person");
+  const { results: games } = await c.env.DB.prepare(
+    `SELECT g.name, r.value, r.created_at AS at FROM results r JOIN games g ON g.id = r.game_id
+      WHERE r.user_id = ? AND r.voided_at IS NULL ORDER BY r.created_at DESC LIMIT 20`,
+  )
+    .bind(id)
+    .all();
+  return { ...u, history: games };
+}
+
+adminRoutes.get("/users/:id", async (c) => c.json(await userCard(c, Number(c.req.param("id")))));
+
+adminRoutes.get("/users/:id/qr", async (c) => {
+  const id = Number(c.req.param("id"));
+  return c.json({ code: await qrCodeFor(c.env, id) });
+});
+
+adminRoutes.get("/lookup", async (c) => {
+  const id = await parseQrCode(c.env, c.req.query("code") ?? "");
+  if (!id) throw new HttpError(404, "This QR code is not a valid Vegan Day Bash code");
+  return c.json(await userCard(c, id));
+});
+
+adminRoutes.patch("/users/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ teamId?: number; name?: string; checkedIn?: boolean; role?: User["role"] }>();
+  const sets: string[] = [];
+  const args: (string | number)[] = [];
+  if (body.teamId !== undefined) {
+    const t = await c.env.DB.prepare("SELECT id FROM teams WHERE id = ?").bind(body.teamId).first();
+    if (!t) throw new HttpError(400, "No such team");
+    sets.push("team_id = ?");
+    args.push(body.teamId);
+  }
+  if (body.name !== undefined && body.name.trim()) {
+    sets.push("display_name = ?");
+    args.push(body.name.trim().slice(0, 60));
+  }
+  if (body.checkedIn !== undefined) {
+    sets.push("checked_in = ?");
+    args.push(body.checkedIn ? 1 : 0);
+  }
+  if (body.role !== undefined) {
+    requireAdmin(c);
+    sets.push("role = ?");
+    args.push(body.role);
+  }
+  if (!sets.length) throw new HttpError(400, "Nothing to change");
+  await c.env.DB.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).bind(...args, id).run();
+  await audit(c.env, me(c).id, "user.update", { id, ...body });
+  return c.json(await userCard(c, id));
+});
+
+adminRoutes.post("/users/:id/link", async (c) => {
+  const id = Number(c.req.param("id"));
+  const exists = await c.env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(id).first();
+  if (!exists) throw new HttpError(404, "No such person");
+  const link = await newLoginLink(c.env, id, origin(c));
+  await audit(c.env, me(c).id, "user.relink", { id });
+  return c.json({ link });
+});
+
+// Has the person scanned and used their current sign-in QR yet? (polled by the Register screen)
+adminRoutes.get("/users/:id/linkstatus", async (c) => {
+  const row = await c.env.DB.prepare(
+    "SELECT last_used_at FROM login_tokens WHERE user_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1",
+  )
+    .bind(Number(c.req.param("id")))
+    .first<{ last_used_at: number | null }>();
+  return c.json({ used: !!row?.last_used_at });
+});
+
+adminRoutes.post("/users/:id/password", async (c) => {
+  const id = Number(c.req.param("id"));
+  const password = generatePassword();
+  const salt = randomToken(8);
+  const hash = await hashPassword(password, salt, c.env.PEPPER);
+  const res = await c.env.DB.prepare("UPDATE users SET pass_salt = ?, pass_hash = ? WHERE id = ?").bind(salt, hash, id).run();
+  if (!res.meta.changes) throw new HttpError(404, "No such person");
+  await audit(c.env, me(c).id, "user.password_reset", { id });
+  return c.json({ password });
+});
+
+adminRoutes.get("/audit", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT a.id, a.action, a.detail, a.created_at AS at, u.display_name AS by
+       FROM audit_log a LEFT JOIN users u ON u.id = a.user_id ORDER BY a.id DESC LIMIT 100`,
+  ).all();
+  return c.json({ entries: results });
+});
+
+// ---------- Settings ----------
+
+adminRoutes.get("/settings", async (c) => c.json({ settings: await getSettings(c.env) }));
+
+adminRoutes.put("/settings", async (c) => {
+  requireAdmin(c);
+  const body = await c.req.json<Record<string, string | number | boolean>>();
+  const current = await getSettings(c.env);
+  const stmts = [];
+  for (const [k, v] of Object.entries(body)) {
+    if (!(k in current) || k === "screen_key") throw new HttpError(400, `Unknown setting ${k}`);
+    const val = typeof v === "boolean" ? (v ? "1" : "0") : String(v);
+    if (k === "rank_points") {
+      const arr = JSON.parse(val);
+      if (!Array.isArray(arr) || arr.some((n) => typeof n !== "number")) throw new HttpError(400, "rank_points must be a list of numbers");
+    } else if (Number.isNaN(Number(val))) throw new HttpError(400, `${k} must be a number`);
+    stmts.push(c.env.DB.prepare("UPDATE settings SET value = ? WHERE key = ?").bind(val, k));
+  }
+  if (stmts.length) await c.env.DB.batch(stmts);
+  await audit(c.env, me(c).id, "settings.update", body);
+  return c.json({ settings: await getSettings(c.env) });
+});
+
+adminRoutes.get("/screen-key", async (c) => {
+  requireAdmin(c);
+  const s = await getSettings(c.env);
+  let key = s.screen_key;
+  if (!key) {
+    key = randomToken(12);
+    await c.env.DB.prepare("INSERT INTO settings (key, value) VALUES ('screen_key', ?)").bind(key).run();
+  }
+  return c.json({ url: `${origin(c)}/screen?key=${key}` });
+});
+
+// ---------- Games ----------
+
+const RESULT_TYPES = ["match_win", "score_high", "time_high", "time_low", "placement"];
+
+adminRoutes.post("/games", async (c) => {
+  requireAdmin(c);
+  const b = await c.req.json<{ name?: string; resultType?: string; description?: string; rules?: string }>();
+  const name = String(b.name ?? "").trim();
+  if (!name || !RESULT_TYPES.includes(String(b.resultType))) throw new HttpError(400, "Need a name and a result type");
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") + "-" + randomToken(2);
+  const max = await c.env.DB.prepare("SELECT COALESCE(MAX(sort), 100) AS m FROM games WHERE kind = 'individual'").first<{ m: number }>();
+  const res = await c.env.DB.prepare(
+    `INSERT INTO games (slug, name, kind, type, result_type, description, rules, status, sort)
+     VALUES (?, ?, 'individual', 'individual', ?, ?, ?, 'upcoming', ?)`,
+  )
+    .bind(slug, name, b.resultType, b.description ?? "", b.rules ?? "", (max?.m ?? 100) + 10)
+    .run();
+  await audit(c.env, me(c).id, "game.create", { name });
+  return c.json({ id: res.meta.last_row_id });
+});
+
+adminRoutes.patch("/games/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const b = await c.req.json<{ status?: string; name?: string; description?: string; rules?: string; resultType?: string; location?: string }>();
+  const sets: string[] = [];
+  const args: (string | number)[] = [];
+  if (b.status !== undefined) {
+    if (!["draft", "upcoming", "live", "closed"].includes(b.status)) throw new HttpError(400, "Bad status");
+    sets.push("status = ?");
+    args.push(b.status);
+  }
+  if (b.name !== undefined || b.description !== undefined || b.rules !== undefined || b.resultType !== undefined || b.location !== undefined) requireAdmin(c);
+  if (b.location !== undefined) {
+    const loc = b.location.trim().slice(0, 40);
+    if (!loc) throw new HttpError(400, "Location cannot be empty");
+    sets.push("location = ?");
+    args.push(loc);
+  }
+  if (b.name !== undefined) (sets.push("name = ?"), args.push(b.name));
+  if (b.description !== undefined) (sets.push("description = ?"), args.push(b.description));
+  if (b.rules !== undefined) (sets.push("rules = ?"), args.push(b.rules));
+  if (b.resultType !== undefined) {
+    if (!RESULT_TYPES.includes(b.resultType)) throw new HttpError(400, "Bad result type");
+    sets.push("result_type = ?");
+    args.push(b.resultType);
+  }
+  if (!sets.length) throw new HttpError(400, "Nothing to change");
+  await c.env.DB.prepare(`UPDATE games SET ${sets.join(", ")} WHERE id = ?`).bind(...args, id).run();
+  await audit(c.env, me(c).id, "game.update", { id, ...b });
+  return c.json({ ok: true });
+});
+
+// ---------- Individual results ----------
+
+adminRoutes.post("/games/:id/results", async (c) => {
+  const gameId = Number(c.req.param("id"));
+  const game = await c.env.DB.prepare("SELECT id, type, result_type FROM games WHERE id = ?").bind(gameId).first<{ id: number; type: string; result_type: string | null }>();
+  if (!game || game.type !== "individual") throw new HttpError(404, "No such individual game");
+  const body = await c.req.json<{ userId?: number; value?: number; winnerId?: number; loserId?: number; idem?: string; note?: string }>();
+
+  const userExists = async (id: number) => !!(await c.env.DB.prepare("SELECT 1 FROM users WHERE id = ?").bind(id).first());
+
+  if (game.result_type === "match_win") {
+    const { winnerId, loserId } = body;
+    if (!winnerId || !loserId || winnerId === loserId) throw new HttpError(400, "Pick a winner and a different loser");
+    if (!(await userExists(winnerId)) || !(await userExists(loserId))) throw new HttpError(404, "No such person");
+    const ref = body.idem ?? randomToken(6);
+    const dup = await c.env.DB.prepare("SELECT 1 FROM results WHERE match_ref = ?").bind(ref).first();
+    if (dup) return c.json({ ok: true, duplicate: true });
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO results (game_id, user_id, value, match_ref, created_by, created_at) VALUES (?, ?, 1, ?, ?, ?)").bind(gameId, winnerId, ref, me(c).id, now()),
+      c.env.DB.prepare("INSERT INTO results (game_id, user_id, value, match_ref, created_by, created_at) VALUES (?, ?, 0, ?, ?, ?)").bind(gameId, loserId, ref, me(c).id, now()),
+    ]);
+    await audit(c.env, me(c).id, "result.match", { gameId, winnerId, loserId });
+    return c.json({ ok: true });
+  }
+
+  const value = Number(body.value);
+  if (!body.userId || !Number.isFinite(value) || value < 0) throw new HttpError(400, "Pick a person and enter a valid number");
+  if (game.result_type === "placement" && (!Number.isInteger(value) || value < 1)) throw new HttpError(400, "Placement must be 1, 2, 3...");
+  if (!(await userExists(body.userId))) throw new HttpError(404, "No such person");
+  try {
+    await c.env.DB.prepare("INSERT INTO results (game_id, user_id, value, note, idem, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(gameId, body.userId, value, body.note ?? null, body.idem ?? null, me(c).id, now())
+      .run();
+  } catch (e) {
+    if (String(e).includes("UNIQUE")) return c.json({ ok: true, duplicate: true });
+    throw e;
+  }
+  await audit(c.env, me(c).id, "result.add", { gameId, userId: body.userId, value });
+  return c.json({ ok: true });
+});
+
+adminRoutes.delete("/results/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const row = await c.env.DB.prepare(
+    "SELECT r.id, r.match_ref, r.game_id, g.type FROM results r JOIN games g ON g.id = r.game_id WHERE r.id = ? AND r.voided_at IS NULL",
+  )
+    .bind(id)
+    .first<{ id: number; match_ref: string | null; game_id: number; type: string }>();
+  if (!row) throw new HttpError(404, "Result not found");
+  if (row.match_ref) await c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE match_ref = ?").bind(now(), row.match_ref).run();
+  else await c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE id = ?").bind(now(), id).run();
+  if (row.type === "greenred") await recalcGreenRed(c.env, row.game_id, me(c).id);
+  await audit(c.env, me(c).id, "result.void", { id });
+  return c.json({ ok: true });
+});
+
+// ---------- Roster (who is playing a game) ----------
+
+async function rosterGame(c: Ctx, gameId: number) {
+  const g = await c.env.DB.prepare("SELECT id, type FROM games WHERE id = ?").bind(gameId).first<{ id: number; type: string }>();
+  if (!g) throw new HttpError(404, "No such game");
+  return g;
+}
+
+adminRoutes.post("/games/:id/players", async (c) => {
+  const g = await rosterGame(c, Number(c.req.param("id")));
+  const body = await c.req.json<{ userIds?: number[]; scope?: "all" | "checked_in" | "team"; teamId?: number }>();
+  let where = "";
+  const args: number[] = [];
+  if (body.userIds?.length) {
+    const ids = [...new Set(body.userIds.map(Number))].filter((n) => Number.isInteger(n));
+    if (!ids.length || ids.length > 300) throw new HttpError(400, "Pick between 1 and 300 people");
+    where = `WHERE id IN (${ids.map(() => "?").join(",")})`;
+    args.push(...ids);
+  } else if (body.scope === "all") {
+    where = "WHERE team_id IS NOT NULL";
+  } else if (body.scope === "checked_in") {
+    where = "WHERE checked_in = 1";
+  } else if (body.scope === "team" && body.teamId) {
+    where = "WHERE team_id = ?";
+    args.push(Number(body.teamId));
+  } else {
+    throw new HttpError(400, "Say who to add");
+  }
+  const res = await c.env.DB.prepare(
+    `INSERT OR IGNORE INTO game_players (game_id, user_id, added_by, added_at)
+     SELECT ?, id, ?, ? FROM users ${where}`,
+  )
+    .bind(g.id, me(c).id, now(), ...args)
+    .run();
+  await notifyNewPlayers(c.env, g.id);
+  await audit(c.env, me(c).id, "roster.add", { gameId: g.id, added: res.meta.changes, scope: body.scope ?? "people" });
+  const total = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM game_players WHERE game_id = ?").bind(g.id).first<{ n: number }>();
+  return c.json({ added: res.meta.changes, total: total?.n ?? 0 });
+});
+
+adminRoutes.delete("/games/:id/players/:userId", async (c) => {
+  const g = await rosterGame(c, Number(c.req.param("id")));
+  const userId = Number(c.req.param("userId"));
+  const res = await c.env.DB.prepare("DELETE FROM game_players WHERE game_id = ? AND user_id = ?").bind(g.id, userId).run();
+  if (res.meta.changes) {
+    // taking someone off also removes their finish time
+    await c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND user_id = ? AND voided_at IS NULL").bind(now(), g.id, userId).run();
+    if (g.type === "greenred") await recalcGreenRed(c.env, g.id, me(c).id);
+    await notifyRemoved(c.env, g.id, userId);
+    await audit(c.env, me(c).id, "roster.remove", { gameId: g.id, userId });
+  }
+  return c.json({ ok: true });
+});
+
+// Clear the whole list (for a mistake). Nobody is told, and finish times are removed.
+adminRoutes.delete("/games/:id/players", async (c) => {
+  const g = await rosterGame(c, Number(c.req.param("id")));
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM game_players WHERE game_id = ?").bind(g.id),
+    c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND voided_at IS NULL").bind(now(), g.id),
+  ]);
+  if (g.type === "greenred") await recalcGreenRed(c.env, g.id, me(c).id);
+  await audit(c.env, me(c).id, "roster.clear", { gameId: g.id });
+  return c.json({ ok: true });
+});
+
+// ---------- Green Light – Red Light: finish times ----------
+
+// Fastest finisher wins. Team points are always recomputed from the recorded times,
+// so adding, changing or removing a time keeps the points correct.
+async function recalcGreenRed(env: Env, gameId: number, by: number) {
+  const s = await getSettings(env);
+  const winPts = Number(s.pts_greenred_winner);
+  const clearPts = Number(s.pts_greenred_cleared);
+  const ref = `gr:${gameId}`;
+  const { results } = await env.DB.prepare(
+    `SELECT r.user_id, u.team_id FROM results r JOIN users u ON u.id = r.user_id
+      WHERE r.game_id = ? AND r.voided_at IS NULL ORDER BY r.value ASC, r.created_at ASC`,
+  )
+    .bind(gameId)
+    .all<{ user_id: number; team_id: number | null }>();
+  const perTeam = new Map<number, number>();
+  results.forEach((r, i) => {
+    if (r.team_id == null) return;
+    perTeam.set(r.team_id, (perTeam.get(r.team_id) ?? 0) + (i === 0 ? winPts : clearPts));
+  });
+  const stmts = [env.DB.prepare("UPDATE team_points SET voided_at = ? WHERE ref = ? AND voided_at IS NULL").bind(now(), ref)];
+  for (const [teamId, pts] of perTeam) stmts.push(addPoints(env, gameId, teamId, pts, "Green Light – Red Light", ref, by));
+  await env.DB.batch(stmts);
+}
+
+adminRoutes.post("/games/:id/finish", async (c) => {
+  const gameId = Number(c.req.param("id"));
+  const game = await c.env.DB.prepare("SELECT id, type FROM games WHERE id = ?").bind(gameId).first<{ id: number; type: string }>();
+  if (!game || game.type !== "greenred") throw new HttpError(404, "Not a Green Light – Red Light game");
+  const body = await c.req.json<{ userId?: number; seconds?: number }>();
+  const seconds = Math.round(Number(body.seconds) * 100) / 100;
+  if (!body.userId || !Number.isFinite(seconds) || seconds <= 0 || seconds > 3600) throw new HttpError(400, "Pick a person and enter a time in seconds (for example 12.4)");
+  const person = await c.env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(body.userId).first();
+  if (!person) throw new HttpError(404, "No such person");
+  await c.env.DB.batch([
+    // anyone who finishes is on the player list (silently if they were not added first)
+    c.env.DB.prepare("INSERT OR IGNORE INTO game_players (game_id, user_id, added_by, added_at, notified) VALUES (?, ?, ?, ?, 1)").bind(gameId, body.userId, me(c).id, now()),
+    c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND user_id = ? AND voided_at IS NULL").bind(now(), gameId, body.userId),
+    c.env.DB.prepare("INSERT INTO results (game_id, user_id, value, created_by, created_at) VALUES (?, ?, ?, ?, ?)").bind(gameId, body.userId, seconds, me(c).id, now()),
+  ]);
+  await recalcGreenRed(c.env, gameId, me(c).id);
+  await audit(c.env, me(c).id, "greenred.finish", { gameId, userId: body.userId, seconds });
+  return c.json({ ok: true });
+});
+
+// ---------- Brackets (Meme Charades and Shark Tank) ----------
+
+async function bracketGame(c: Ctx, gameId: number) {
+  const game = await c.env.DB.prepare("SELECT id, type FROM games WHERE id = ?").bind(gameId).first<{ id: number; type: string }>();
+  if (!game || (game.type !== "meme" && game.type !== "shark")) throw new HttpError(404, "This game has no bracket");
+  return game;
+}
+
+adminRoutes.post("/games/:id/bracket", async (c) => {
+  const game = await bracketGame(c, Number(c.req.param("id")));
+  // Who plays whom: two pairs that together use each of the four teams once.
+  const body = await c.req.json<{ pairs?: number[][] }>().catch(() => ({} as { pairs?: number[][] }));
+  const pairs = body.pairs ?? [[1, 2], [3, 4]];
+  const flat = pairs.flat().map(Number);
+  const valid = pairs.length === 2 && pairs.every((p) => p.length === 2) && flat.length === 4 && new Set(flat).size === 4 && flat.every((n) => n >= 1 && n <= 4);
+  if (!valid) throw new HttpError(400, "Pick two matches that use each of the four teams once");
+
+  // An existing bracket can be re-drawn only while nothing has started
+  const started = await c.env.DB.prepare(
+    `SELECT 1 FROM matches m WHERE m.game_id = ? AND (m.status != 'pending' OR m.stage = 'final'
+       OR EXISTS (SELECT 1 FROM meme_rounds r WHERE r.match_id = m.id) OR EXISTS (SELECT 1 FROM pitches p WHERE p.match_id = m.id)) LIMIT 1`,
+  )
+    .bind(game.id)
+    .first();
+  if (started) throw new HttpError(409, "This bracket has already started, so the matchups can't change. An admin can reset it.");
+
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM matches WHERE game_id = ?").bind(game.id),
+    c.env.DB.prepare("INSERT INTO matches (game_id, stage, team_a, team_b) VALUES (?, 'semi1', ?, ?)").bind(game.id, Number(pairs[0][0]), Number(pairs[0][1])),
+    c.env.DB.prepare("INSERT INTO matches (game_id, stage, team_a, team_b) VALUES (?, 'semi2', ?, ?)").bind(game.id, Number(pairs[1][0]), Number(pairs[1][1])),
+  ]);
+  await audit(c.env, me(c).id, "bracket.create", { gameId: game.id, pairs });
+  return c.json({ ok: true });
+});
+
+adminRoutes.post("/games/:id/bracket/reset", async (c) => {
+  requireAdmin(c);
+  const game = await bracketGame(c, Number(c.req.param("id")));
+  // foreign keys cascade to meme_rounds, pitches and pitch_votes
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE team_points SET voided_at = ? WHERE game_id = ? AND voided_at IS NULL").bind(now(), game.id),
+    c.env.DB.prepare("DELETE FROM matches WHERE game_id = ?").bind(game.id),
+  ]);
+  await audit(c.env, me(c).id, "bracket.reset", { gameId: game.id });
+  return c.json({ ok: true });
+});
+
+interface MatchRow {
+  id: number;
+  game_id: number;
+  stage: string;
+  team_a: number;
+  team_b: number | null;
+  status: string;
+  winner_team: number | null;
+  type: string;
+}
+
+async function getMatch(c: Ctx, id: number) {
+  const m = await c.env.DB.prepare(
+    "SELECT m.*, g.type FROM matches m JOIN games g ON g.id = m.game_id WHERE m.id = ?",
+  )
+    .bind(id)
+    .first<MatchRow>();
+  if (!m) throw new HttpError(404, "No such match");
+  return m;
+}
+
+adminRoutes.post("/matches/:id/status", async (c) => {
+  const m = await getMatch(c, Number(c.req.param("id")));
+  const { status } = await c.req.json<{ status?: string }>();
+  if (status !== "pending" && status !== "live") throw new HttpError(400, "Bad status");
+  if (m.status === "done") throw new HttpError(409, "Match is finished");
+  await c.env.DB.prepare("UPDATE matches SET status = ? WHERE id = ?").bind(status, m.id).run();
+  return c.json({ ok: true });
+});
+
+adminRoutes.post("/matches/:id/rounds", async (c) => {
+  const m = await getMatch(c, Number(c.req.param("id")));
+  if (m.type !== "meme") throw new HttpError(400, "Only Meme Charades has rounds");
+  if (m.status === "done") throw new HttpError(409, "Match is finished. Reset the bracket to change it.");
+  const body = await c.req.json<{ round?: number; scores?: Record<string, number> }>();
+  const round = Number(body.round);
+  if (!Number.isInteger(round) || round < 1 || round > 12) throw new HttpError(400, "Bad round number");
+  const stmts = [];
+  for (const teamId of [m.team_a, m.team_b]) {
+    if (teamId == null) continue;
+    const raw = body.scores?.[String(teamId)];
+    if (raw === undefined) continue;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 0 || n > 99) throw new HttpError(400, "Scores must be whole numbers");
+    stmts.push(
+      c.env.DB.prepare(
+        `INSERT INTO meme_rounds (match_id, round, team_id, correct) VALUES (?, ?, ?, ?)
+         ON CONFLICT (match_id, round, team_id) DO UPDATE SET correct = excluded.correct`,
+      ).bind(m.id, round, teamId, n),
+    );
+  }
+  if (!stmts.length) throw new HttpError(400, "No scores given");
+  if (m.status === "pending") stmts.push(c.env.DB.prepare("UPDATE matches SET status = 'live' WHERE id = ?").bind(m.id));
+  await c.env.DB.batch(stmts);
+  return c.json({ ok: true });
+});
+
+async function finishAndAdvance(c: Ctx, m: MatchRow, winner: number, loser: number | null) {
+  const s = await getSettings(c.env);
+  const ref = `match:${m.id}`;
+  await voidRef(c.env, ref);
+  const stmts = [c.env.DB.prepare("UPDATE matches SET status = 'done', winner_team = ? WHERE id = ?").bind(winner, m.id)];
+  if (m.type === "meme") {
+    if (m.stage === "final") {
+      stmts.push(addPoints(c.env, m.game_id, winner, Number(s.pts_final_win), "Meme Charades final win", ref, me(c).id));
+      if (loser) stmts.push(addPoints(c.env, m.game_id, loser, Number(s.pts_final_runner_up), "Meme Charades final runner-up", ref, me(c).id));
+    } else {
+      stmts.push(addPoints(c.env, m.game_id, winner, Number(s.pts_semi_win), "Meme Charades semi-final win", ref, me(c).id));
+    }
+  }
+  await c.env.DB.batch(stmts);
+
+  if (m.stage !== "final") {
+    const { results: semis } = await c.env.DB.prepare("SELECT stage, winner_team, status FROM matches WHERE game_id = ? AND stage IN ('semi1','semi2')")
+      .bind(m.game_id)
+      .all<{ stage: string; winner_team: number | null; status: string }>();
+    const s1 = semis.find((x) => x.stage === "semi1");
+    const s2 = semis.find((x) => x.stage === "semi2");
+    if (s1?.winner_team && s2?.winner_team && s1.status === "done" && s2.status === "done") {
+      const fin = await c.env.DB.prepare("SELECT id, status FROM matches WHERE game_id = ? AND stage = 'final'").bind(m.game_id).first<{ id: number; status: string }>();
+      if (!fin) {
+        await c.env.DB.prepare("INSERT INTO matches (game_id, stage, team_a, team_b) VALUES (?, 'final', ?, ?)").bind(m.game_id, s1.winner_team, s2.winner_team).run();
+      } else if (fin.status === "pending") {
+        await c.env.DB.prepare("UPDATE matches SET team_a = ?, team_b = ? WHERE id = ?").bind(s1.winner_team, s2.winner_team, fin.id).run();
+      } else {
+        throw new HttpError(409, "The final already started. Reset the bracket to change a semi-final result.");
+      }
+    }
+  }
+  await audit(c.env, me(c).id, "match.finish", { matchId: m.id, winner });
+}
+
+adminRoutes.post("/matches/:id/finish", async (c) => {
+  const m = await getMatch(c, Number(c.req.param("id")));
+  if (m.team_b == null) throw new HttpError(400, "Match needs two teams");
+  const body = await c.req.json<{ winnerTeam?: number }>().catch(() => ({} as { winnerTeam?: number }));
+  let scoreA = 0;
+  let scoreB = 0;
+  if (m.type === "meme") {
+    const { results } = await c.env.DB.prepare("SELECT team_id, SUM(correct) AS n FROM meme_rounds WHERE match_id = ? GROUP BY team_id").bind(m.id).all<{ team_id: number; n: number }>();
+    scoreA = results.find((r) => r.team_id === m.team_a)?.n ?? 0;
+    scoreB = results.find((r) => r.team_id === m.team_b)?.n ?? 0;
+  } else {
+    const { results } = await c.env.DB.prepare("SELECT team_id, state, avg FROM pitches WHERE match_id = ?").bind(m.id).all<{ team_id: number; state: string; avg: number | null }>();
+    const pa = results.find((r) => r.team_id === m.team_a);
+    const pb = results.find((r) => r.team_id === m.team_b);
+    if (!pa || !pb || pa.state !== "closed" || pb.state !== "closed") throw new HttpError(409, "Both pitches must be rated and closed first");
+    scoreA = pa.avg ?? 0;
+    scoreB = pb.avg ?? 0;
+  }
+  let winner: number;
+  if (scoreA !== scoreB) winner = scoreA > scoreB ? m.team_a : m.team_b;
+  else if (body.winnerTeam === m.team_a || body.winnerTeam === m.team_b) winner = body.winnerTeam;
+  else throw new HttpError(409, m.type === "meme" ? "It is a tie. Add a sudden-death round, or pick the winner." : "It is a tie. Pick the winner.");
+  const loser = winner === m.team_a ? m.team_b : m.team_a;
+  await finishAndAdvance(c, m, winner, loser);
+  return c.json({ ok: true, winner });
+});
+
+// ---------- Shark Tank pitches ----------
+
+const ITEMS = [
+  "Karela (bitter gourd)", "Lauki (bottle gourd)", "Tinda (apple gourd)", "Baingan (brinjal)", "Drumstick",
+  "Beetroot", "Cauliflower", "Capsicum", "Raw banana", "Papaya", "Pineapple", "Watermelon", "Pomegranate", "Custard apple",
+];
+
+adminRoutes.post("/matches/:id/pitches", async (c) => {
+  const m = await getMatch(c, Number(c.req.param("id")));
+  if (m.type !== "shark" || m.team_b == null) throw new HttpError(400, "Not a Shark Tank match");
+  const existing = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM pitches WHERE match_id = ?").bind(m.id).first<{ n: number }>();
+  if ((existing?.n ?? 0) > 0) throw new HttpError(409, "Items already drawn");
+  const pool = [...ITEMS].sort(() => Math.random() - 0.5);
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO pitches (match_id, team_id, item) VALUES (?, ?, ?)").bind(m.id, m.team_a, pool[0]),
+    c.env.DB.prepare("INSERT INTO pitches (match_id, team_id, item) VALUES (?, ?, ?)").bind(m.id, m.team_b, pool[1]),
+    c.env.DB.prepare("UPDATE matches SET status = 'live' WHERE id = ? AND status = 'pending'").bind(m.id),
+  ]);
+  return c.json({ ok: true });
+});
+
+adminRoutes.patch("/pitches/:id", async (c) => {
+  const { item } = await c.req.json<{ item?: string }>();
+  if (!item?.trim()) throw new HttpError(400, "Item is required");
+  await c.env.DB.prepare("UPDATE pitches SET item = ? WHERE id = ?").bind(item.trim().slice(0, 60), Number(c.req.param("id"))).run();
+  return c.json({ ok: true });
+});
+
+async function getPitch(c: Ctx, id: number) {
+  const p = await c.env.DB.prepare(
+    `SELECT p.id, p.match_id, p.team_id, p.state, m.game_id, m.team_a, m.team_b
+       FROM pitches p JOIN matches m ON m.id = p.match_id WHERE p.id = ?`,
+  )
+    .bind(id)
+    .first<{ id: number; match_id: number; team_id: number; state: string; game_id: number; team_a: number; team_b: number }>();
+  if (!p) throw new HttpError(404, "No such pitch");
+  return p;
+}
+
+adminRoutes.post("/pitches/:id/open", async (c) => {
+  const p = await getPitch(c, Number(c.req.param("id")));
+  const other = await c.env.DB.prepare("SELECT id FROM pitches WHERE state = 'voting' AND id != ?").bind(p.id).first();
+  if (other) throw new HttpError(409, "Close the pitch that is currently being rated first");
+  await voidRef(c.env, `pitch:${p.id}`);
+  await c.env.DB.prepare("UPDATE pitches SET state = 'voting', avg = NULL, votes = 0 WHERE id = ?").bind(p.id).run();
+  await audit(c.env, me(c).id, "pitch.open", { id: p.id });
+  return c.json({ ok: true });
+});
+
+adminRoutes.post("/pitches/:id/close", async (c) => {
+  const p = await getPitch(c, Number(c.req.param("id")));
+  if (p.state !== "voting") throw new HttpError(409, "This pitch is not open for rating");
+  const body = await c.req.json<{ force?: boolean }>().catch(() => ({} as { force?: boolean }));
+  const tally = await pitchTally(c.env, p);
+  if (tally.votes < tally.minVotes && !body.force) {
+    throw new HttpError(409, `Only ${tally.votes} votes so far (minimum ${tally.minVotes}). Close anyway to force it.`);
+  }
+  const ref = `pitch:${p.id}`;
+  await voidRef(c.env, ref);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE pitches SET state = 'closed', votes = ?, avg = ? WHERE id = ?").bind(tally.votes, tally.avg, p.id),
+    addPoints(c.env, p.game_id, p.team_id, round1(tally.avg), "Shark Tank pitch (audience score)", ref, me(c).id),
+  ]);
+  await audit(c.env, me(c).id, "pitch.close", { id: p.id, ...tally });
+  return c.json({ ok: true, ...tally });
+});
+
+// ---------- Manual team points and corrections ----------
+
+adminRoutes.post("/team-points", async (c) => {
+  const b = await c.req.json<{ teamId?: number; points?: number; reason?: string; gameId?: number | null }>();
+  const points = Number(b.points);
+  if (!b.teamId || !Number.isFinite(points) || !b.reason?.trim()) throw new HttpError(400, "Need a team, points and a reason");
+  await c.env.DB.prepare("INSERT INTO team_points (game_id, team_id, points, reason, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(b.gameId ?? null, b.teamId, points, b.reason.trim(), me(c).id, now())
+    .run();
+  await audit(c.env, me(c).id, "team_points.add", b);
+  return c.json({ ok: true });
+});
+
+adminRoutes.get("/team-points", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT tp.id, tp.team_id AS teamId, tp.points, tp.reason, tp.created_at AS at, tp.voided_at AS voidedAt, g.name AS game
+       FROM team_points tp LEFT JOIN games g ON g.id = tp.game_id ORDER BY tp.id DESC LIMIT 60`,
+  ).all();
+  return c.json({ entries: results });
+});
+
+adminRoutes.delete("/team-points/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  await c.env.DB.prepare("UPDATE team_points SET voided_at = ? WHERE id = ? AND voided_at IS NULL").bind(now(), id).run();
+  await audit(c.env, me(c).id, "team_points.void", { id });
+  return c.json({ ok: true });
+});
+
+// Full detail for organisers (same builder as the public one, but with extra controls data)
+adminRoutes.get("/games/:id", async (c) => {
+  return c.json(await buildGameDetail(c.env, Number(c.req.param("id")), me(c), true));
+});

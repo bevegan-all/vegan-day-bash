@@ -3,6 +3,10 @@
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
+// Some browsers only offer "install" when a fetch handler exists. This one does nothing:
+// every request goes to the network, so the app is never served from a stale copy.
+self.addEventListener("fetch", () => {});
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const url = (event.notification.data && event.notification.data.url) || "/";

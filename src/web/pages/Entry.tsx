@@ -35,6 +35,8 @@ export function Login() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [codeMode, setCodeMode] = useState(false);
+  const [code, setCode] = useState("");
   const [status, setStatus] = useState({ needsSetup: false, testAccounts: false });
 
   useEffect(() => {
@@ -92,6 +94,44 @@ export function Login() {
             Sign in
           </Btn>
         </form>
+        <div className="mt-3 border-t border-line pt-3">
+          {codeMode ? (
+            <form
+              className="space-y-2"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setBusy(true);
+                try {
+                  await api("/auth/handoff/redeem", { body: { code } });
+                  await refresh();
+                  nav("/", { replace: true });
+                } catch (err) {
+                  toastError(err);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <p className="text-sm text-muted">Already signed in in your browser? Open Profile there, tap Install, then Show my sign-in code. Enter it here.</p>
+              <input
+                className={inputCls + " text-center font-mono text-xl uppercase tracking-widest"}
+                placeholder="ABCD-EFGH"
+                aria-label="Sign-in code"
+                autoCapitalize="characters"
+                autoCorrect="off"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+              />
+              <Btn full busy={busy} disabled={code.replace(/[^a-z0-9]/gi, "").length < 8}>
+                Sign in with code
+              </Btn>
+            </form>
+          ) : (
+            <Btn variant="ghost" full onClick={() => setCodeMode(true)}>
+              Sign in with a code
+            </Btn>
+          )}
+        </div>
         {status.needsSetup && (
           <Btn variant="ghost" full className="mt-2" onClick={() => nav("/setup")}>
             First time? Set up the admin account

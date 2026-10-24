@@ -263,4 +263,26 @@ ok(look.status === 200 && look.j.id === users[0].id, "identity QR lookup works")
 const forged = await admin.req(`/admin/lookup?code=${encodeURIComponent("VDB1." + users[0].id + ".0000000000000000")}`);
 ok(forged.status === 404, "forged QR rejected");
 
+// ---- one-time sign-in code (moves a sign-in into the installed app)
+const hand = await users[3].c.req("/auth/handoff", {});
+ok(hand.status === 200 && /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(hand.j.code), "signed-in person can get a sign-in code");
+const fresh = new Client();
+r = await fresh.req("/auth/handoff/redeem", { code: hand.j.code.toLowerCase().replace("-", " ") });
+ok(r.status === 200, "code works in a new browser (case and spacing ignored)");
+const meNew = await fresh.req("/me");
+ok(meNew.j.user && meNew.j.user.id === users[3].id, "the new browser is signed in as the same person");
+r = await new Client().req("/auth/handoff/redeem", { code: hand.j.code });
+ok(r.status === 404, "a code works only once");
+r = await new Client().req("/auth/handoff/redeem", { code: "ZZZZ-ZZZZ" });
+ok(r.status === 404, "a wrong code is rejected");
+r = await new Client().req("/auth/handoff", {});
+ok(r.status === 401, "signed-out people can't make codes");
+const man = await fetch(B + "/manifest.webmanifest");
+const mj = await man.json();
+ok(man.ok && mj.display === "standalone" && mj.icons.length >= 3, "install manifest is served");
+for (const ic of mj.icons) {
+  const ir = await fetch(B + ic.src);
+  ok(ir.ok && ir.headers.get("content-type").includes("png"), "icon loads: " + ic.src);
+}
+
 console.log(failed ? `\n${failed} FAILED` : "\nALL PASSED");

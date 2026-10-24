@@ -8,6 +8,7 @@ import { isOrganiser, useAuth } from "../auth";
 import { TeamIcon } from "../art";
 import { BoardList, GameCard, GameThumb, LocationTag, MatchCard, Podium, RatingPicker } from "../components";
 import { AlertsToggle, usePulse } from "../pulse";
+import { InstallCard } from "../install";
 import { Avatar, Btn, Card, ErrorBox, Page, RankBadge, SectionLabel, Segmented, Spinner, StatusPill, TeamChip, TeamMark, ThemeSelect } from "../ui";
 
 interface HomeData {
@@ -379,6 +380,13 @@ export function Profile() {
         )}
         <p className="mt-3 text-xs text-subtle">Turn up your screen brightness if it won't scan.</p>
       </Card>
+
+      <section>
+        <SectionLabel>Install the app</SectionLabel>
+        <Card>
+          <InstallCard />
+        </Card>
+      </section>
 
       <section>
         <SectionLabel>Phone alerts</SectionLabel>

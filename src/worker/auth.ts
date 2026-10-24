@@ -111,6 +111,45 @@ authRoutes.post("/auth/link", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---- One-time sign-in code, for moving a sign-in into the installed app ----
+// An installed iPhone app keeps its own storage, so it starts signed out. A signed-in person
+// gets a short code here and types it into the installed app.
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const HANDOFF_TTL_MS = 15 * 60 * 1000;
+const handoffFailures = { n: 0, until: 0 };
+
+authRoutes.post("/auth/handoff", async (c) => {
+  const user = c.get("user");
+  if (!user) throw new HttpError(401, "Not signed in");
+  const code = [...crypto.getRandomValues(new Uint8Array(8))].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join("");
+  const expiresAt = now() + HANDOFF_TTL_MS;
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM handoff_codes WHERE user_id = ? AND used_at IS NULL").bind(user.id),
+    c.env.DB.prepare("INSERT INTO handoff_codes (code_hash, user_id, expires_at) VALUES (?, ?, ?)").bind(await sha256(`handoff:${code}`), user.id, expiresAt),
+  ]);
+  return c.json({ code: `${code.slice(0, 4)}-${code.slice(4)}`, expiresAt });
+});
+
+authRoutes.post("/auth/handoff/redeem", async (c) => {
+  if (handoffFailures.until > now() && handoffFailures.n >= 15) throw new HttpError(429, "Too many wrong codes. Wait a minute and try again.");
+  const body = await c.req.json<{ code?: string }>();
+  const code = String(body.code ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const row =
+    code.length === 8
+      ? await c.env.DB.prepare("SELECT user_id FROM handoff_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?")
+          .bind(await sha256(`handoff:${code}`), now())
+          .first<{ user_id: number }>()
+      : null;
+  if (!row) {
+    handoffFailures.n = handoffFailures.until > now() ? handoffFailures.n + 1 : 1;
+    handoffFailures.until = now() + 60_000;
+    throw new HttpError(404, "That code is wrong or has expired. Get a new one in the browser where you are signed in.");
+  }
+  await c.env.DB.prepare("UPDATE handoff_codes SET used_at = ? WHERE code_hash = ?").bind(now(), await sha256(`handoff:${code}`)).run();
+  await startSession(c, row.user_id);
+  return c.json({ ok: true });
+});
+
 authRoutes.get("/me", async (c) => {
   const user = c.get("user");
   if (!user) return c.json({ user: null });

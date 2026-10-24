@@ -7,6 +7,7 @@ import { applyTheme } from "./theme";
 import { AuthProvider, isOrganiser, useAuth } from "./auth";
 import { BottomNav, HeaderSlot, Spinner, Toaster } from "./ui";
 import { NotificationBell, PulseProvider } from "./pulse";
+import { InstallPrompt } from "./install";
 import { Login, Setup, SignInLink } from "./pages/Entry";
 import { GamesList, GameView, Home, Leaderboard, Profile } from "./pages/Participant";
 import { AdminHub, PersonDetail, People, Register, ScanPage } from "./pages/Admin";
@@ -23,6 +24,7 @@ function Protected({ organiser = false }: { organiser?: boolean }) {
     <HeaderSlot.Provider value={<NotificationBell />}>
       <Outlet />
       <BottomNav />
+      <InstallPrompt />
     </HeaderSlot.Provider>
   );
 }

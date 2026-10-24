@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "vdb",
-      "database_id": "REPLACE_WITH_ID_FROM_wrangler_d1_create",
+      "database_id": "f1c5577f-46b8-4934-99b8-331701164c14",
       "migrations_dir": "migrations"
     }
   ]

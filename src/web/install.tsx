@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { Check, EllipsisVertical, Share, SquarePlus } from "lucide-react";
 import { api } from "./api";
 import { Btn, Modal, toastError } from "./ui";
@@ -38,23 +38,6 @@ export const isIos = () =>
   new URLSearchParams(location.search).get("install") === "ios" ||
   /iphone|ipad|ipod/i.test(navigator.userAgent) ||
   (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-
-const SNOOZE_KEY = "vdb-install-snooze";
-const SNOOZE_MS = 12 * 3600 * 1000;
-const snoozed = () => {
-  try {
-    return Date.now() - Number(localStorage.getItem(SNOOZE_KEY) ?? 0) < SNOOZE_MS;
-  } catch {
-    return false;
-  }
-};
-const snooze = () => {
-  try {
-    localStorage.setItem(SNOOZE_KEY, String(Date.now()));
-  } catch {
-    /* ignore */
-  }
-};
 
 export function useInstall() {
   const canPrompt = useSyncExternalStore(
@@ -164,33 +147,6 @@ export function InstallBody({ onDone }: { onDone: () => void }) {
 
       <HandoffCode />
     </div>
-  );
-}
-
-// The sheet that appears after sign-in. Only for people who can actually install.
-export function InstallPrompt() {
-  const { canPrompt, ios, standalone } = useInstall();
-  const [open, setOpen] = useState(false);
-  const eligible = !standalone && (canPrompt || ios);
-
-  useEffect(() => {
-    if (!eligible || snoozed()) return;
-    const t = setTimeout(() => setOpen(true), 1500);
-    return () => clearTimeout(t);
-  }, [eligible]);
-
-  if (!open || !eligible) return null;
-  const close = () => {
-    snooze();
-    setOpen(false);
-  };
-  return (
-    <Modal title="Get the app" onClose={close}>
-      <InstallBody onDone={() => setOpen(false)} />
-      <Btn variant="ghost" full className="mt-3" onClick={close}>
-        Not now
-      </Btn>
-    </Modal>
   );
 }
 

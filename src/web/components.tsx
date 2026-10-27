@@ -239,6 +239,9 @@ export function MatchCard({ match, kind, onChanged }: { match: Match; kind: "mem
               <TeamLine id={match.teamB} />
             </div>
           )}
+          {(match.pitches ?? []).length === 2 && match.pitches!.every((p) => p.phase === "done") && match.status !== "done" && (
+            <p className="rounded-lg bg-warn-soft px-3 py-2 text-sm font-semibold text-warn">It's a tie. The organisers will decide who moves forward.</p>
+          )}
           {(match.pitches ?? []).map((p) => (
             <div key={p.id} className={`rounded-lg border p-3 ${winner === p.teamId ? "border-accent bg-accent-soft" : "border-line bg-sunken"}`}>
               <div className="flex items-center justify-between gap-2">

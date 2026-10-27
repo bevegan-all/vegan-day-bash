@@ -678,9 +678,34 @@ function SharkRound({ match, game, reload }: { match: Match; game: GameDetail; r
         </div>
       )}
       {bothDone && !done && (
-        <div className="space-y-2">
-          <p className="text-sm font-medium text-warn">The scores are level. Pick the winner.</p>
-          <FinishButton match={match} reload={reload} label="Pick the winner" />
+        <div className="space-y-3 rounded-lg border border-warn/40 bg-warn-soft p-3">
+          <div>
+            <div className="font-semibold text-warn">It's a tie</div>
+            <p className="text-sm text-muted">
+              Both teams scored the same. {match.stage === "final" ? "Choose the Shark Tank champion." : "Choose which team moves forward."}
+            </p>
+          </div>
+          <div className="grid gap-2">
+            {[match.teamA, match.teamB].map(
+              (t) =>
+                t && (
+                  <Btn
+                    key={t}
+                    variant="secondary"
+                    size="lg"
+                    onClick={async () => {
+                      if (!confirm(`${teamById(t)?.name} ${match.stage === "final" ? "wins Shark Tank" : "moves forward"}?`)) return;
+                      if (await call(`/admin/matches/${match.id}/finish`, { winnerTeam: t })) {
+                        toast(`Team ${teamById(t)?.name} ${match.stage === "final" ? "wins" : "moves forward"}`);
+                        reload();
+                      }
+                    }}
+                  >
+                    <TeamIcon teamId={t} size={28} /> {teamById(t)?.name} {match.stage === "final" ? "wins" : "moves forward"}
+                  </Btn>
+                ),
+            )}
+          </div>
         </div>
       )}
     </Card>

@@ -195,6 +195,30 @@ ok(r.status === 200, "a turn can be restarted");
 d = (await admin.req(`/admin/games/${shark.id}`)).j;
 ok(d.matches[1].pitches.find((p) => p.teamId === 4).phase === "idle", "restarted turn is waiting again");
 
+// a tie in the second round is decided by the organiser
+{
+  const m2 = (await admin.req(`/admin/games/${shark.id}`)).j.matches[1]; // Chicken v Pig
+  const pigT = m2.pitches.find((p) => p.teamId === 4), chickT = m2.pitches.find((p) => p.teamId === 2);
+  for (const pt of [pigT, chickT]) {
+    for (const ph of ["prep", "pitching", "voting"]) await admin.req(`/admin/pitches/${pt.id}/phase`, { phase: ph });
+    for (const u of users) if (u.team !== pt.teamId) await u.c.req(`/pitches/${pt.id}/vote`, { rating: 7 });
+    r = await admin.req(`/admin/pitches/${pt.id}/close`, {});
+  }
+  ok(r.status === 200 && r.j.tie === true && r.j.winner === null, "equal averages are a tie: no winner is chosen automatically");
+  r = await admin.req(`/admin/matches/${m2.id}/finish`, {});
+  ok(r.status === 409 && /tie/i.test(r.j.error), "finishing a tied round without choosing is refused");
+  if (process.env.STOP_AT_TIE) { console.log("stopped at the tie for a manual look"); process.exit(0); }
+  r = await users[0].c.req(`/admin/matches/${m2.id}/finish`, { winnerTeam: 2 });
+  ok(r.status === 403, "players can't choose the winner");
+  r = await admin.req(`/admin/matches/${m2.id}/finish`, { winnerTeam: 1 });
+  ok(r.status === 409, "the winner must be one of the two teams");
+  r = await admin.req(`/admin/matches/${m2.id}/finish`, { winnerTeam: 2 });
+  ok(r.status === 200 && r.j.winner === 2, "organiser chose Chicken to move forward");
+  const dd = (await admin.req(`/admin/games/${shark.id}`)).j;
+  const fin2 = dd.matches.find((x) => x.stage === "final");
+  ok(fin2 && [fin2.teamA, fin2.teamB].includes(2), "the final is created with the team the organiser chose");
+}
+
 // ---- individual games
 const cup = g("cup-flip-tic-tac-toe");
 r = await admin.req(`/admin/games/${cup.id}/results`, { winnerId: users[0].id, loserId: users[1].id, idem: "m1" });

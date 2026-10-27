@@ -15,7 +15,7 @@ import {
   type User,
 } from "./lib";
 import { createUser, newLoginLink } from "./users";
-import { buildGameDetail, pitchTally } from "./games";
+import { buildGameDetail, pitchTally, sharkTimers } from "./games";
 import { notifyNewPlayers, notifyRemoved } from "./notify";
 
 export const adminRoutes = new Hono<AppEnv>();
@@ -611,24 +611,30 @@ adminRoutes.post("/matches/:id/finish", async (c) => {
   return c.json({ ok: true, winner });
 });
 
-// ---------- Shark Tank pitches ----------
+// ---------- Shark Tank: guided rounds ----------
+// A round is two pitches, one after the other. Each pitch goes idle -> prep -> pitching -> voting -> done.
 
 const ITEMS = [
   "Karela (bitter gourd)", "Lauki (bottle gourd)", "Tinda (apple gourd)", "Baingan (brinjal)", "Drumstick",
   "Beetroot", "Cauliflower", "Capsicum", "Raw banana", "Papaya", "Pineapple", "Watermelon", "Pomegranate", "Custard apple",
 ];
 
-adminRoutes.post("/matches/:id/pitches", async (c) => {
+// The organiser picks which team pitches first. Items are drawn for both teams at the same time.
+adminRoutes.post("/matches/:id/start-round", async (c) => {
   const m = await getMatch(c, Number(c.req.param("id")));
-  if (m.type !== "shark" || m.team_b == null) throw new HttpError(400, "Not a Shark Tank match");
+  if (m.type !== "shark" || m.team_b == null) throw new HttpError(400, "Not a Shark Tank round");
+  const { firstTeam } = await c.req.json<{ firstTeam?: number }>();
+  if (firstTeam !== m.team_a && firstTeam !== m.team_b) throw new HttpError(400, "Pick which team pitches first");
   const existing = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM pitches WHERE match_id = ?").bind(m.id).first<{ n: number }>();
-  if ((existing?.n ?? 0) > 0) throw new HttpError(409, "Items already drawn");
+  if ((existing?.n ?? 0) > 0) throw new HttpError(409, "This round has already started");
+  const second = firstTeam === m.team_a ? m.team_b : m.team_a;
   const pool = [...ITEMS].sort(() => Math.random() - 0.5);
   await c.env.DB.batch([
-    c.env.DB.prepare("INSERT INTO pitches (match_id, team_id, item) VALUES (?, ?, ?)").bind(m.id, m.team_a, pool[0]),
-    c.env.DB.prepare("INSERT INTO pitches (match_id, team_id, item) VALUES (?, ?, ?)").bind(m.id, m.team_b, pool[1]),
-    c.env.DB.prepare("UPDATE matches SET status = 'live' WHERE id = ? AND status = 'pending'").bind(m.id),
+    c.env.DB.prepare("INSERT INTO pitches (match_id, team_id, item, ord) VALUES (?, ?, ?, 1)").bind(m.id, firstTeam, pool[0]),
+    c.env.DB.prepare("INSERT INTO pitches (match_id, team_id, item, ord) VALUES (?, ?, ?, 2)").bind(m.id, second, pool[1]),
+    c.env.DB.prepare("UPDATE matches SET status = 'live' WHERE id = ?").bind(m.id),
   ]);
+  await audit(c.env, me(c).id, "shark.start_round", { matchId: m.id, firstTeam });
   return c.json({ ok: true });
 });
 
@@ -639,43 +645,99 @@ adminRoutes.patch("/pitches/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+interface PitchRow {
+  id: number;
+  match_id: number;
+  team_id: number;
+  state: string;
+  phase: string;
+  ord: number;
+  game_id: number;
+  team_a: number;
+  team_b: number;
+  match_status: string;
+}
+
 async function getPitch(c: Ctx, id: number) {
   const p = await c.env.DB.prepare(
-    `SELECT p.id, p.match_id, p.team_id, p.state, m.game_id, m.team_a, m.team_b
+    `SELECT p.id, p.match_id, p.team_id, p.state, p.phase, p.ord, m.game_id, m.team_a, m.team_b, m.status AS match_status
        FROM pitches p JOIN matches m ON m.id = p.match_id WHERE p.id = ?`,
   )
     .bind(id)
-    .first<{ id: number; match_id: number; team_id: number; state: string; game_id: number; team_a: number; team_b: number }>();
+    .first<PitchRow>();
   if (!p) throw new HttpError(404, "No such pitch");
   return p;
 }
 
-adminRoutes.post("/pitches/:id/open", async (c) => {
+// Which phase each button moves from
+const PHASE_FROM: Record<string, string> = { prep: "idle", pitching: "prep", voting: "pitching" };
+
+adminRoutes.post("/pitches/:id/phase", async (c) => {
   const p = await getPitch(c, Number(c.req.param("id")));
-  const other = await c.env.DB.prepare("SELECT id FROM pitches WHERE state = 'voting' AND id != ?").bind(p.id).first();
-  if (other) throw new HttpError(409, "Close the pitch that is currently being rated first");
+  const { phase } = await c.req.json<{ phase?: string }>();
+  if (!phase || !(phase in PHASE_FROM)) throw new HttpError(400, "Bad phase");
+  if (p.match_status === "done") throw new HttpError(409, "This round is finished");
+  if (p.phase !== PHASE_FROM[phase]) throw new HttpError(409, `This turn is at "${p.phase}", so it can't go to "${phase}" yet`);
+  const earlier = await c.env.DB.prepare("SELECT 1 FROM pitches WHERE match_id = ? AND ord < ? AND phase != 'done'").bind(p.match_id, p.ord).first();
+  if (earlier) throw new HttpError(409, "Finish the first team's turn before starting this one");
+  if (phase === "voting") {
+    const other = await c.env.DB.prepare("SELECT 1 FROM pitches WHERE phase = 'voting' AND id != ?").bind(p.id).first();
+    if (other) throw new HttpError(409, "Another pitch is still being rated");
+  }
+  const timers = await sharkTimers(c.env);
+  const seconds = phase === "prep" ? timers.prep : phase === "pitching" ? timers.pitch : timers.vote;
+  const endsAt = now() + seconds * 1000;
+  await c.env.DB.prepare("UPDATE pitches SET phase = ?, phase_ends_at = ?, state = ?, votes = 0, avg = NULL WHERE id = ?")
+    .bind(phase, endsAt, phase === "voting" ? "voting" : "pending", p.id)
+    .run();
+  await audit(c.env, me(c).id, "shark.phase", { pitchId: p.id, phase });
+  return c.json({ ok: true, endsAt });
+});
+
+// Start this team's turn over (for a mistake). Clears its votes and points.
+adminRoutes.post("/pitches/:id/reset", async (c) => {
+  const p = await getPitch(c, Number(c.req.param("id")));
+  if (p.match_status === "done") throw new HttpError(409, "This round is finished. An admin can reset the bracket.");
+  const later = await c.env.DB.prepare("SELECT 1 FROM pitches WHERE match_id = ? AND ord > ? AND phase != 'idle'").bind(p.match_id, p.ord).first();
+  if (later) throw new HttpError(409, "Restart the second team's turn first");
   await voidRef(c.env, `pitch:${p.id}`);
-  await c.env.DB.prepare("UPDATE pitches SET state = 'voting', avg = NULL, votes = 0 WHERE id = ?").bind(p.id).run();
-  await audit(c.env, me(c).id, "pitch.open", { id: p.id });
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM pitch_votes WHERE pitch_id = ?").bind(p.id),
+    c.env.DB.prepare("UPDATE pitches SET phase = 'idle', phase_ends_at = NULL, state = 'pending', votes = 0, avg = NULL WHERE id = ?").bind(p.id),
+  ]);
+  await audit(c.env, me(c).id, "shark.reset", { pitchId: p.id });
   return c.json({ ok: true });
 });
 
+// Save the audience score. When both teams have pitched, the higher average advances on its own.
 adminRoutes.post("/pitches/:id/close", async (c) => {
   const p = await getPitch(c, Number(c.req.param("id")));
-  if (p.state !== "voting") throw new HttpError(409, "This pitch is not open for rating");
+  if (p.phase !== "voting") throw new HttpError(409, "Open voting for this pitch first");
   const body = await c.req.json<{ force?: boolean }>().catch(() => ({} as { force?: boolean }));
-  const tally = await pitchTally(c.env, p);
+  const tally = await pitchTally(c.env, { id: p.id, team_id: p.team_id, team_a: p.team_a, team_b: p.team_b });
   if (tally.votes < tally.minVotes && !body.force) {
-    throw new HttpError(409, `Only ${tally.votes} votes so far (minimum ${tally.minVotes}). Close anyway to force it.`);
+    throw new HttpError(409, `Only ${tally.votes} votes so far (minimum ${tally.minVotes}). Save anyway to force it.`);
   }
   const ref = `pitch:${p.id}`;
   await voidRef(c.env, ref);
   await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE pitches SET state = 'closed', votes = ?, avg = ? WHERE id = ?").bind(tally.votes, tally.avg, p.id),
+    c.env.DB.prepare("UPDATE pitches SET phase = 'done', phase_ends_at = NULL, state = 'closed', votes = ?, avg = ? WHERE id = ?").bind(tally.votes, tally.avg, p.id),
     addPoints(c.env, p.game_id, p.team_id, round1(tally.avg), "Shark Tank pitch (audience score)", ref, me(c).id),
   ]);
   await audit(c.env, me(c).id, "pitch.close", { id: p.id, ...tally });
-  return c.json({ ok: true, ...tally });
+
+  let winner: number | null = null;
+  let tie = false;
+  const { results: both } = await c.env.DB.prepare("SELECT team_id, phase, avg FROM pitches WHERE match_id = ?").bind(p.match_id).all<{ team_id: number; phase: string; avg: number | null }>();
+  if (both.length === 2 && both.every((x) => x.phase === "done")) {
+    if (both[0].avg === both[1].avg) tie = true;
+    else {
+      winner = (both[0].avg ?? 0) > (both[1].avg ?? 0) ? both[0].team_id : both[1].team_id;
+      const loser = winner === both[0].team_id ? both[1].team_id : both[0].team_id;
+      await finishAndAdvance(c, await getMatch(c, p.match_id), winner, loser);
+    }
+  }
+  return c.json({ ok: true, ...tally, winner, tie });
 });
 
 // ---------- Manual team points and corrections ----------

@@ -1,6 +1,15 @@
 import { HttpError, getSettings, shortName, type Env, type User } from "./lib";
 import { computeIndividual, publicBoard } from "./leaderboard";
 
+export async function sharkTimers(env: Env) {
+  const s = await getSettings(env);
+  const n = (k: string, d: number) => {
+    const v = Number(s[k]);
+    return Number.isFinite(v) && v > 0 ? v : d;
+  };
+  return { prep: n("shark_prep_seconds", 300), pitch: n("shark_pitch_seconds", 180), vote: n("shark_vote_seconds", 60) };
+}
+
 export async function pitchTally(env: Env, p: { id: number; team_id: number; team_a: number; team_b: number }) {
   const s = await getSettings(env);
   const opponent = p.team_id === p.team_a ? p.team_b : p.team_a;
@@ -65,10 +74,10 @@ export async function buildGameDetail(env: Env, gameId: number, viewer: User | n
         out.push({ ...m, rounds, totals });
       } else {
         const { results: pitches } = await env.DB.prepare(
-          "SELECT id, team_id AS teamId, item, state, votes, avg FROM pitches WHERE match_id = ? ORDER BY id",
+          "SELECT id, team_id AS teamId, item, state, votes, avg, ord, phase, phase_ends_at AS phaseEndsAt FROM pitches WHERE match_id = ? ORDER BY ord, id",
         )
           .bind(m.id)
-          .all<{ id: number; teamId: number; item: string; state: string; votes: number; avg: number | null }>();
+          .all<{ id: number; teamId: number; item: string; state: string; votes: number; avg: number | null; ord: number; phase: string; phaseEndsAt: number | null }>();
         const enriched = [];
         for (const p of pitches) {
           let myRating: number | null = null;
@@ -93,7 +102,7 @@ export async function buildGameDetail(env: Env, gameId: number, viewer: User | n
         out.push({ ...m, pitches: enriched });
       }
     }
-    return { ...base, matches: out };
+    return { ...base, matches: out, serverNow: Date.now(), timers: game.type === "shark" ? await sharkTimers(env) : undefined };
   }
 
   if (game.type === "greenred" || game.type === "individual") {

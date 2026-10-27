@@ -1,7 +1,8 @@
 import { useSearchParams } from "react-router-dom";
 import { Crown } from "lucide-react";
 import { teamById } from "../../shared/teams";
-import { usePoll, stageLabel, type Board, type GameDetail, type TeamRow } from "../api";
+import { usePoll, stageLabel, type Board, type GameDetail, type Pitch, type TeamRow } from "../api";
+import { PhaseChip, PhaseTimer, useClock } from "../shark";
 import { GameArt, TeamIcon } from "../art";
 import { LocationTag, Podium } from "../components";
 import { Logo, RankBadge, StatusPill, TeamName } from "../ui";
@@ -16,7 +17,7 @@ interface ScreenData {
 export function Screen() {
   const [params] = useSearchParams();
   const key = params.get("key") ?? "";
-  const { data, error } = usePoll<ScreenData>(`/screen?key=${encodeURIComponent(key)}`, 8000);
+  const { data, error } = usePoll<ScreenData>(`/screen?key=${encodeURIComponent(key)}`, 5000);
 
   if (error && !data) {
     return <div className="dark flex min-h-dvh items-center justify-center bg-bg p-8 text-center text-2xl text-fg">{error.message}</div>;
@@ -89,6 +90,37 @@ export function Screen() {
   );
 }
 
+// One team's pitch on the big screen: whose turn, which phase, and a large countdown
+function ScreenPitch({ pitch, winner, offset }: { pitch: Pitch; winner: boolean; offset: number }) {
+  const now = useClock(offset);
+  const running = pitch.phase === "prep" || pitch.phase === "pitching" || pitch.phase === "voting";
+  return (
+    <div className={`rounded-lg border p-4 text-center ${winner ? "border-warn bg-warn-soft" : running ? "border-accent bg-surface" : "border-line bg-surface"}`}>
+      <TeamName teamId={pitch.teamId} size={40} className="justify-center text-3xl font-semibold" />
+      <div className="mt-1 text-lg text-muted">{pitch.item}</div>
+      <div className="mt-2 flex justify-center">
+        <PhaseChip phase={pitch.phase} />
+      </div>
+      {running && (
+        <div className="mt-3">
+          <PhaseTimer phase={pitch.phase} endsAt={pitch.phaseEndsAt} now={now} big />
+          {pitch.phase === "voting" && (
+            <div className="mt-2 text-2xl font-semibold text-live">
+              Rate on your phone <span className="tabular-nums">({pitch.votes} votes)</span>
+            </div>
+          )}
+        </div>
+      )}
+      {pitch.phase === "done" && <div className="mt-2 text-6xl font-semibold tabular-nums tracking-tight">{pitch.avg?.toFixed(1)}</div>}
+      {winner && (
+        <div className="mt-2 inline-flex items-center gap-1 text-lg font-semibold text-warn">
+          <Crown size={18} /> Advances
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LiveGame({ game }: { game: GameDetail }) {
   return (
     <div className="rounded-2xl border border-line bg-surface p-6">
@@ -124,26 +156,11 @@ function LiveGame({ game }: { game: GameDetail }) {
             <div className="mb-3 text-xs font-semibold uppercase tracking-widest text-subtle">{stageLabel(m.stage)}</div>
             <div className="grid gap-3 md:grid-cols-2">
               {(m.pitches ?? []).map((p) => (
-                <div key={p.id} className={`rounded-lg border p-4 text-center ${m.winnerTeam === p.teamId ? "border-warn bg-warn-soft" : "border-line bg-surface"}`}>
-                  <TeamName teamId={p.teamId} size={34} className="justify-center text-2xl font-semibold" />
-                  <div className="text-base text-muted">{p.item}</div>
-                  {p.state === "closed" && <div className="mt-1 text-6xl font-semibold tabular-nums tracking-tight">{p.avg?.toFixed(1)}</div>}
-                  {p.state === "voting" && (
-                    <div className="mt-2 text-xl font-semibold text-live">
-                      Rate now on your phone <span className="tabular-nums">({p.votes} votes)</span>
-                    </div>
-                  )}
-                  {p.state === "pending" && <div className="mt-1 text-subtle">Up next</div>}
-                  {m.winnerTeam === p.teamId && (
-                    <div className="mt-1 inline-flex items-center gap-1 text-sm font-semibold text-warn">
-                      <Crown size={16} /> Advances
-                    </div>
-                  )}
-                </div>
+                <ScreenPitch key={p.id} pitch={p} winner={m.winnerTeam === p.teamId} offset={(game.serverNow ?? Date.now()) - Date.now()} />
               ))}
               {(m.pitches ?? []).length === 0 && (
-                <div className="text-2xl md:col-span-2">
-                  {teamById(m.teamA)?.name} vs {teamById(m.teamB ?? 0)?.name}
+                <div className="flex items-center justify-center gap-4 text-2xl md:col-span-2">
+                  <TeamName teamId={m.teamA} size={34} /> <span className="text-subtle">vs</span> <TeamName teamId={m.teamB} size={34} />
                 </div>
               )}
             </div>

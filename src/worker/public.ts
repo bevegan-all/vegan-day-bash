@@ -58,12 +58,14 @@ publicRoutes.post("/pitches/:id/vote", async (c) => {
   const r = Number(rating);
   if (!Number.isInteger(r) || r < 1 || r > 10) throw new HttpError(400, "Rating must be 1 to 10");
   const p = await c.env.DB.prepare(
-    "SELECT p.id, p.state, p.team_id, m.team_a, m.team_b FROM pitches p JOIN matches m ON m.id = p.match_id WHERE p.id = ?",
+    "SELECT p.id, p.state, p.team_id, p.phase_ends_at, m.team_a, m.team_b FROM pitches p JOIN matches m ON m.id = p.match_id WHERE p.id = ?",
   )
     .bind(pitchId)
-    .first<{ id: number; state: string; team_id: number; team_a: number; team_b: number }>();
+    .first<{ id: number; state: string; team_id: number; phase_ends_at: number | null; team_a: number; team_b: number }>();
   if (!p) throw new HttpError(404, "No such pitch");
   if (p.state !== "voting") throw new HttpError(409, "Rating is not open for this pitch");
+  // a few seconds of grace for slow phones
+  if (p.phase_ends_at && now() > p.phase_ends_at + 5000) throw new HttpError(409, "Voting time is up");
   if (user.team_id == null) throw new HttpError(403, "You are not on a team yet");
   if (user.team_id === p.team_id) throw new HttpError(403, "You can't rate your own team's pitch");
   const s = await getSettings(c.env);

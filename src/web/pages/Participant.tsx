@@ -6,7 +6,8 @@ import { teamById } from "../../shared/teams";
 import { api, fmtTime, usePoll, type Board, type GameDetail, type GameSummary, type TeamRow } from "../api";
 import { isOrganiser, useAuth } from "../auth";
 import { TeamIcon } from "../art";
-import { BoardList, GameCard, GameThumb, LocationTag, MatchCard, Podium, RatingPicker } from "../components";
+import { BoardList, GameCard, GameThumb, LocationTag, MatchCard, Podium } from "../components";
+import { SharkLiveCard } from "../shark";
 import { AlertsToggle, usePulse } from "../pulse";
 import { InstallCard } from "../install";
 import { Avatar, Btn, Card, ErrorBox, Page, RankBadge, SectionLabel, Segmented, Spinner, StatusPill, TeamChip, TeamMark, ThemeSelect } from "../ui";
@@ -21,8 +22,7 @@ interface HomeData {
 export function Home() {
   const { me } = useAuth();
   const { data, error, loading, reload } = usePoll<HomeData>("/home", 45000);
-  const { pulse, reload: reloadPulse } = usePulse();
-  const voting = pulse?.voting ?? null;
+  const { pulse, reload: reloadPulse, offset } = usePulse();
   const live = pulse?.live ?? [];
   const team = teamById(me?.team?.id);
   const myPoints = data?.teams.find((t) => t.teamId === team?.id)?.total;
@@ -53,29 +53,7 @@ export function Home() {
         </Card>
       )}
 
-      {voting && (
-        <Card className="border-live/50 ring-1 ring-live/20">
-          <div className="mb-3 flex items-center justify-between">
-            <span className="font-semibold">Rate this pitch</span>
-            <StatusPill status="live" />
-          </div>
-          <div className="mb-3 flex items-center gap-3">
-            <TeamMark teamId={voting.team_id} size={40} />
-            <div>
-              <div className="font-semibold">Team {voting.team_name}</div>
-              <div className="text-sm text-muted">Pitching: {voting.item}</div>
-            </div>
-          </div>
-          {voting.canVote ? (
-            <RatingPicker
-              pitch={{ id: voting.id, teamId: voting.team_id, item: voting.item, state: "voting", votes: 0, avg: null, myRating: voting.my_rating, canVote: true }}
-              onDone={reloadPulse}
-            />
-          ) : (
-            <p className="text-sm font-medium text-muted">Your team is pitching, so you can't rate this one. Good luck.</p>
-          )}
-        </Card>
-      )}
+      {pulse?.shark && <SharkLiveCard shark={pulse.shark} offset={offset} onVoted={reloadPulse} />}
 
       {live.length > 0 && (
         <section>
@@ -187,6 +165,13 @@ export function GameView() {
   const { id } = useParams();
   const { me } = useAuth();
   const { data, error, loading, reload } = usePoll<GameDetail>(`/games/${id}`, 15000);
+  const { pulse, reload: reloadPulse, offset } = usePulse();
+  const turn = pulse?.shark && String(pulse.shark.gameId) === id ? pulse.shark : null;
+  const turnKey = turn ? `${turn.pitchId}:${turn.phase}` : "";
+  useEffect(() => {
+    if (turnKey) reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnKey]);
 
   return (
     <Page
@@ -205,6 +190,7 @@ export function GameView() {
       {data && (
         <>
           <GameThumb slug={data.slug} name={data.name} className="aspect-[16/7] w-full rounded-xl border border-line" />
+          {turn && <SharkLiveCard shark={turn} offset={offset} onVoted={reloadPulse} />}
           <Card>
             <div className="mb-3 flex items-center gap-2">
               <StatusPill status={data.status} />

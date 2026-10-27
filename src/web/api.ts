@@ -50,17 +50,19 @@ export function usePoll<T>(path: string | null, intervalMs = 15000) {
   useEffect(() => {
     setData(null);
     setLoading(true);
-    if (!path) return;
-    load();
-    let timer: number | undefined;
+    if (path) load();
+  }, [path, load]);
+
+  useEffect(() => {
+    if (!path || intervalMs <= 0) return;
     const tick = () => {
       if (document.visibilityState === "visible") load();
     };
-    if (intervalMs > 0) timer = window.setInterval(tick, intervalMs);
+    const timer = window.setInterval(tick, intervalMs);
     const onVis = () => document.visibilityState === "visible" && load();
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      if (timer) clearInterval(timer);
+      clearInterval(timer);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [path, intervalMs, load]);
@@ -116,10 +118,28 @@ export interface AppNotification {
   readAt?: number | null;
 }
 
+// The Shark Tank turn in progress, as seen by one person
+export interface SharkLive {
+  gameId: number;
+  matchId: number;
+  stage: "semi1" | "semi2" | "final";
+  pitchId: number;
+  teamId: number;
+  teamName: string;
+  item: string;
+  ord: number;
+  phase: Exclude<PitchPhase, "done">;
+  endsAt: number | null;
+  youPitching: boolean;
+  canVote: boolean;
+  myRating: number | null;
+}
+
 export interface Pulse {
+  serverNow: number;
   notifications: AppNotification[];
   live: { id: number; slug: string; name: string; kind: string; type: string; location: string; youIn: boolean }[];
-  voting: { id: number; item: string; team_id: number; team_name: string; game_id: number; canVote: boolean; voted: boolean; my_rating: number | null } | null;
+  shark: SharkLive | null;
 }
 
 export const fmtTime = (s: number) => {
@@ -153,10 +173,23 @@ export interface TeamRow {
   rank: number;
 }
 
+export type PitchPhase = "idle" | "prep" | "pitching" | "voting" | "done";
+
+export const PHASE_LABEL: Record<PitchPhase, string> = {
+  idle: "Up next",
+  prep: "Preparing",
+  pitching: "Pitching",
+  voting: "Voting",
+  done: "Done",
+};
+
 export interface Pitch {
   id: number;
   teamId: number;
   item: string;
+  ord: number;
+  phase: PitchPhase;
+  phaseEndsAt: number | null;
   state: "pending" | "voting" | "closed";
   votes: number;
   avg: number | null;
@@ -178,6 +211,8 @@ export interface Match {
 
 export interface GameDetail extends GameSummary {
   rules: string;
+  serverNow?: number;
+  timers?: { prep: number; pitch: number; vote: number };
   matches?: Match[];
   board?: Board;
   recent?: { id: number; value: number; at: number; name: string; teamId: number | null; matchRef: string | null }[];

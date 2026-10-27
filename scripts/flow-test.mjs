@@ -81,46 +81,119 @@ await admin.req(`/admin/matches/${fin.id}/finish`, {});
 tb = (await users[0].c.req("/leaderboard/teams")).j.teams;
 ok(tb.find((t) => t.teamId === 4).total === 15, "re-finishing does not double points");
 
-// ---- Shark Tank
+// ---- Shark Tank: turn by turn
 const shark = g("shark-tank");
+await admin.req("/admin/settings", { shark_prep_seconds: 5, shark_pitch_seconds: 4, shark_vote_seconds: 30 }, "PUT");
 r = await admin.req(`/admin/games/${shark.id}/bracket`, { pairs: [[1, 1], [2, 3]] });
 ok(r.status === 400, "invalid matchups rejected");
 r = await admin.req(`/admin/games/${shark.id}/bracket`, { pairs: [[1, 3], [2, 4]] });
 ok(r.status === 200, "admin chooses Cow v Goat and Chicken v Pig");
 r = await admin.req(`/admin/games/${shark.id}/bracket`, { pairs: [[1, 4], [2, 3]] });
 ok(r.status === 200, "matchups can be changed before anything starts");
-r = await admin.req(`/admin/games/${shark.id}/bracket`, { pairs: [[1, 3], [2, 4]] });
+await admin.req(`/admin/games/${shark.id}/bracket`, { pairs: [[1, 3], [2, 4]] });
 d = (await admin.req(`/admin/games/${shark.id}`)).j;
 ok(d.matches.length === 2 && d.matches[0].teamA === 1 && d.matches[0].teamB === 3 && d.matches[1].teamA === 2 && d.matches[1].teamB === 4, "bracket has the chosen pairs");
+ok(d.timers.prep === 5 && d.timers.vote === 30 && typeof d.serverNow === "number", "game detail has timers and the server clock");
 const sm = d.matches[0]; // Cow v Goat
-r = await admin.req(`/admin/matches/${sm.id}/pitches`, {});
-ok(r.status === 200, "shark items drawn");
+const cowU = users.filter((u) => u.team === 1), goatU = users.filter((u) => u.team === 3), chickU = users.filter((u) => u.team === 2), pigU = users.filter((u) => u.team === 4);
+
+ok((await others0Pulse()).shark === null, "no Shark Tank turn is shown before a round starts");
+async function others0Pulse() { return (await users[0].c.req("/pulse")).j; }
+
+r = await admin.req(`/admin/matches/${sm.id}/start-round`, { firstTeam: 2 });
+ok(r.status === 400, "first team must be in the match");
+r = await admin.req(`/admin/matches/${sm.id}/start-round`, { firstTeam: 3 });
+ok(r.status === 200, "round started with Goat pitching first");
+r = await admin.req(`/admin/matches/${sm.id}/start-round`, { firstTeam: 3 });
+ok(r.status === 409, "a round can only be started once");
 r = await admin.req(`/admin/games/${shark.id}/bracket`, { pairs: [[1, 2], [3, 4]] });
-ok(r.status === 409, "matchups locked once pitches are drawn");
+ok(r.status === 409, "matchups locked once the round has started");
 d = (await admin.req(`/admin/games/${shark.id}`)).j;
-const pitch = d.matches[0].pitches.find((p) => p.teamId === 1); // Cow pitching
-r = await users[0].c.req(`/pitches/${pitch.id}/vote`, { rating: 8 });
-ok(r.status === 409, "can't vote before voting opens");
-await admin.req(`/admin/pitches/${pitch.id}/open`, {});
-let cowVotes = 0, others = [];
+let pitches = d.matches[0].pitches;
+const goatP = pitches.find((p) => p.teamId === 3), cowP = pitches.find((p) => p.teamId === 1);
+ok(goatP.ord === 1 && cowP.ord === 2 && goatP.phase === "idle", "Goat is first, Cow second, both waiting");
+
+// second team cannot start before the first has finished
+r = await admin.req(`/admin/pitches/${cowP.id}/phase`, { phase: "prep" });
+ok(r.status === 409, "the second team can't start before the first has finished");
+// phases must go in order
+r = await admin.req(`/admin/pitches/${goatP.id}/phase`, { phase: "voting" });
+ok(r.status === 409, "can't skip straight to voting");
+
+// what players see
+let pl = (await goatU[0].c.req("/pulse")).j;
+ok(pl.shark && pl.shark.teamId === 3 && pl.shark.phase === "idle" && pl.shark.youPitching === true, "pitching team sees it is their turn (waiting)");
+r = await admin.req(`/admin/pitches/${goatP.id}/phase`, { phase: "prep" });
+ok(r.status === 200 && r.j.endsAt > Date.now() + 3000, "preparation started with a server-side end time");
+pl = (await cowU[0].c.req("/pulse")).j;
+ok(pl.shark.phase === "prep" && pl.shark.youPitching === false && pl.shark.endsAt > pl.serverNow, "other team sees Goat is preparing, with a countdown");
+r = await cowU[0].c.req(`/pitches/${goatP.id}/vote`, { rating: 9 });
+ok(r.status === 409, "can't vote during preparation");
+await admin.req(`/admin/pitches/${goatP.id}/phase`, { phase: "pitching" });
+pl = (await chickU[0].c.req("/pulse")).j;
+ok(pl.shark.phase === "pitching", "everyone sees the pitching phase");
+
+// voting
+r = await admin.req(`/admin/pitches/${goatP.id}/phase`, { phase: "voting" });
+ok(r.status === 200, "voting opened");
+let goatVotes = 0, others = [];
 for (const u of users) {
-  r = await u.c.req(`/pitches/${pitch.id}/vote`, { rating: u.team === 2 ? 10 : 6 });
-  if (u.team === 1) { ok(r.status === 403, "Cow member blocked from rating Cow pitch"); cowVotes++; }
+  r = await u.c.req(`/pitches/${goatP.id}/vote`, { rating: u.team === 1 ? 8 : 6 });
+  if (u.team === 3) { ok(r.status === 403, "Goat member blocked from rating the Goat pitch"); goatVotes++; }
   else others.push(u);
 }
-r = await others[0].c.req(`/pitches/${pitch.id}/vote`, { rating: 11 });
+r = await others[0].c.req(`/pitches/${goatP.id}/vote`, { rating: 11 });
 ok(r.status === 400, "rating 11 rejected");
-// change a vote
-const chick = users.find((u) => u.team === 2);
-await chick.c.req(`/pitches/${pitch.id}/vote`, { rating: 4 });
-const h = await others[0].c.req("/pulse");
-ok(h.j.voting && h.j.voting.id === pitch.id && h.j.voting.canVote === true, "pulse shows the open rating");
-r = await admin.req(`/admin/pitches/${pitch.id}/close`, {});
-const expectVotes = others.length;
-ok(r.status === 200 && r.j.votes === expectVotes, `closed with ${r.j.votes} eligible votes (expected ${expectVotes})`);
-console.log("avg:", r.j.avg);
-r = await users[0].c.req(`/pitches/${pitch.id}/vote`, { rating: 5 });
-ok(r.status === 409 || r.status === 403, "no voting after close");
+await cowU[0].c.req(`/pitches/${goatP.id}/vote`, { rating: 10 }); // changes an earlier vote
+pl = (await cowU[0].c.req("/pulse")).j;
+ok(pl.shark.phase === "voting" && pl.shark.canVote === true && pl.shark.myRating === 10, "voter sees voting open with their own rating");
+pl = (await goatU[0].c.req("/pulse")).j;
+ok(pl.shark.phase === "voting" && pl.shark.canVote === false && pl.shark.youPitching === true, "pitching team sees voting but can't vote");
+r = await admin.req(`/admin/pitches/${cowP.id}/phase`, { phase: "prep" });
+ok(r.status === 409, "second team still blocked while the first is being rated");
+r = await admin.req(`/admin/pitches/${goatP.id}/close`, {});
+const eligible = others.length;
+ok(r.status === 200 && r.j.votes === eligible && r.j.winner === null, `Goat saved with ${r.j.votes} votes; round waits for Cow`);
+const goatAvg = r.j.avg;
+console.log("Goat avg:", goatAvg);
+r = await cowU[0].c.req(`/pitches/${goatP.id}/vote`, { rating: 5 });
+ok(r.status === 409, "no voting after the result is saved");
+
+// second pitch: Cow, with a short voting time to test the closing grace
+pl = (await goatU[0].c.req("/pulse")).j;
+ok(pl.shark.teamId === 1 && pl.shark.phase === "idle", "now it is Cow's turn (waiting)");
+for (const ph of ["prep", "pitching", "voting"]) {
+  r = await admin.req(`/admin/pitches/${cowP.id}/phase`, { phase: ph });
+  if (r.status !== 200) ok(false, "cow phase " + ph);
+}
+for (const u of users) {
+  if (u.team !== 1) await u.c.req(`/pitches/${cowP.id}/vote`, { rating: u.team === 3 ? 9 : 7 });
+}
+r = await cowU[0].c.req(`/pitches/${cowP.id}/vote`, { rating: 9 });
+ok(r.status === 403, "Cow member blocked from rating the Cow pitch");
+r = await admin.req(`/admin/pitches/${cowP.id}/close`, {});
+ok(r.status === 200 && r.j.winner !== null, `round decided automatically (winner team ${r.j.winner})`);
+const cowAvg = r.j.avg;
+console.log("Cow avg:", cowAvg);
+const expectedWinner = cowAvg > goatAvg ? 1 : 3;
+ok(r.j.winner === expectedWinner, "the higher average advanced");
+d = (await admin.req(`/admin/games/${shark.id}`)).j;
+ok(d.matches[0].status === "done" && d.matches[0].winnerTeam === expectedWinner, "round marked done with the winner");
+pl = (await goatU[0].c.req("/pulse")).j;
+ok(pl.shark === null, "no turn in progress after the round");
+tb = (await users[0].c.req("/leaderboard/teams")).j.teams;
+ok(Math.abs(tb.find((t) => t.teamId === 1).total - (8 + Math.round(cowAvg * 10) / 10)) < 0.01, "Cow has meme points plus its Shark Tank score");
+
+// restart a turn: reset the second round's first team after a mistake
+const sm2 = d.matches[1]; // Chicken v Pig
+await admin.req(`/admin/matches/${sm2.id}/start-round`, { firstTeam: 4 });
+d = (await admin.req(`/admin/games/${shark.id}`)).j;
+const pigP = d.matches[1].pitches.find((p) => p.teamId === 4);
+await admin.req(`/admin/pitches/${pigP.id}/phase`, { phase: "prep" });
+r = await admin.req(`/admin/pitches/${pigP.id}/reset`, {});
+ok(r.status === 200, "a turn can be restarted");
+d = (await admin.req(`/admin/games/${shark.id}`)).j;
+ok(d.matches[1].pitches.find((p) => p.teamId === 4).phase === "idle", "restarted turn is waiting again");
 
 // ---- individual games
 const cup = g("cup-flip-tic-tac-toe");

@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Dices, MapPin, Minus, Play, Plus, ScanLine, Square, X } from "lucide-react";
 import { TEAMS, teamById } from "../../shared/teams";
-import { api, fmtTime, stageLabel, usePoll, type GameDetail, type Match } from "../api";
+import { api, fmtTime, stageLabel, usePoll, type GameDetail, type Match, type Pitch } from "../api";
 import { useAuth } from "../auth";
 import { TeamIcon } from "../art";
 import { GameThumb, LocationTag, Podium } from "../components";
 import { PersonField, PersonPickerModal, type Person } from "../pickers";
+import { PhaseChip, PhaseSteps, PhaseTimer, useClock } from "../shark";
 import { Btn, Card, Countdown, ErrorBox, IconBtn, Modal, Page, RankBadge, SectionLabel, Spinner, StatusPill, TeamChip, TeamMark, TeamName, toast, toastError } from "../ui";
 
 async function call(path: string, body: unknown = {}, method = "POST") {
@@ -457,11 +458,7 @@ function BracketControl({ game, reload, kind }: { game: GameDetail; reload: () =
   }
   return (
     <>
-      {kind === "meme" ? (
-        <Countdown presets={[{ label: "Decide 1:00", seconds: 60 }, { label: "Act 1:00", seconds: 60 }]} />
-      ) : (
-        <Countdown presets={[{ label: "Prep 5:00", seconds: 300 }, { label: "Pitch 3:00", seconds: 180 }, { label: "Rate 1:00", seconds: 60 }]} />
-      )}
+      {kind === "meme" && <Countdown presets={[{ label: "Decide 1:00", seconds: 60 }, { label: "Act 1:00", seconds: 60 }]} />}
       {matches.length === 0 || changing ? (
         <PairingPicker onCreate={create} label={matches.length ? "Save matchups" : "Create bracket"} onCancel={changing ? () => setChanging(false) : undefined} />
       ) : (
@@ -471,7 +468,7 @@ function BracketControl({ game, reload, kind }: { game: GameDetail; reload: () =
               Change who plays whom
             </Btn>
           )}
-          {matches.map((m) => (kind === "meme" ? <MemeMatch key={m.id} match={m} reload={reload} /> : <SharkMatch key={m.id} match={m} reload={reload} />))}
+          {matches.map((m) => (kind === "meme" ? <MemeMatch key={m.id} match={m} reload={reload} /> : <SharkRound key={m.id} match={m} game={game} reload={reload} />))}
         </>
       )}
     </>
@@ -611,86 +608,197 @@ function MemeMatch({ match, reload }: { match: Match; reload: () => void }) {
   );
 }
 
-function SharkMatch({ match, reload }: { match: Match; reload: () => void }) {
-  const pitches = match.pitches ?? [];
-  const done = match.status === "done";
+const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
-  async function draw() {
-    if (await call(`/admin/matches/${match.id}/pitches`)) reload();
-  }
-  async function editItem(pid: number, current: string) {
-    const item = prompt("Veggie or fruit for this team", current);
-    if (item && (await call(`/admin/pitches/${pid}`, { item }, "PATCH"))) reload();
-  }
-  async function open(pid: number) {
-    if (await call(`/admin/pitches/${pid}/open`)) reload();
-  }
-  async function close(pid: number, votes: number) {
-    try {
-      await api(`/admin/pitches/${pid}/close`, { body: {} });
+// One Shark Tank round (two pitches, one after the other). The organiser steps each team through
+// preparation, pitch and voting with one button at a time.
+function SharkRound({ match, game, reload }: { match: Match; game: GameDetail; reload: () => void }) {
+  const offset = useMemo(() => (game.serverNow ?? Date.now()) - Date.now(), [game.serverNow]);
+  const timers = game.timers ?? { prep: 300, pitch: 180, vote: 60 };
+  const [choosing, setChoosing] = useState(false);
+  const pitches = [...(match.pitches ?? [])].sort((a, b) => a.ord - b.ord);
+  const active = pitches.find((p) => p.phase !== "done");
+  const done = match.status === "done";
+  const bothDone = pitches.length === 2 && !active;
+
+  async function start(firstTeam: number) {
+    if (await call(`/admin/matches/${match.id}/start-round`, { firstTeam })) {
+      setChoosing(false);
+      toast(`${teamById(firstTeam)?.name} pitches first`);
       reload();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "";
-      if (/Only \d+ votes/.test(msg) && confirm(`${msg}\n\nClose anyway with ${votes} votes?`)) {
-        await call(`/admin/pitches/${pid}/close`, { force: true });
-        reload();
-      } else toastError(e);
     }
   }
 
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="font-semibold">{stageLabel(match.stage)}</h2>
         <StatusPill status={done ? "closed" : match.status === "live" ? "live" : "upcoming"} />
       </div>
+
       {pitches.length === 0 ? (
         <>
-          <p className="text-center text-sm text-muted">
-            {teamById(match.teamA)?.name} vs {teamById(match.teamB ?? 0)?.name}
-          </p>
-          <Btn full onClick={draw}>
-            <Dices size={18} /> Draw a veggie or fruit for each team
+          <div className="flex items-center justify-center gap-4 py-1">
+            <TeamName teamId={match.teamA} size={32} className="font-semibold" />
+            <span className="text-sm text-subtle">vs</span>
+            <TeamName teamId={match.teamB} size={32} className="font-semibold" />
+          </div>
+          <Btn full size="lg" onClick={() => setChoosing(true)}>
+            Start {stageLabel(match.stage).toLowerCase()}
           </Btn>
+          {choosing && (
+            <Modal title="Who pitches first?" onClose={() => setChoosing(false)}>
+              <p className="mb-4 text-sm text-muted">The other team pitches second. A veggie or fruit is drawn for each team.</p>
+              <div className="grid gap-2">
+                {[match.teamA, match.teamB].map(
+                  (t) =>
+                    t && (
+                      <Btn key={t} variant="secondary" size="lg" onClick={() => start(t)}>
+                        <TeamIcon teamId={t} size={28} /> {teamById(t)?.name} pitches first
+                      </Btn>
+                    ),
+                )}
+              </div>
+            </Modal>
+          )}
         </>
       ) : (
         pitches.map((p) => (
-          <div key={p.id} className={`space-y-2.5 rounded-lg border p-3 ${match.winnerTeam === p.teamId ? "border-accent bg-accent-soft" : "border-line bg-sunken"}`}>
-            <div className="flex items-center justify-between gap-2">
-              <span className="inline-flex items-center gap-2 font-semibold">
-                <TeamMark teamId={p.teamId} size={28} />
-                {teamById(p.teamId)?.name}
-              </span>
-              {p.state === "closed" && (
-                <span className="text-2xl font-semibold tabular-nums">
-                  {p.avg?.toFixed(1)}
-                  <span className="text-sm font-normal text-subtle"> ({p.votes} votes)</span>
-                </span>
-              )}
-            </div>
-            <button className="text-left text-sm text-muted underline decoration-dotted underline-offset-4" onClick={() => editItem(p.id, p.item)}>
-              Pitching: {p.item} (tap to change)
-            </button>
-            {p.state === "pending" && !done && (
-              <Btn full onClick={() => open(p.id)}>
-                <Play size={16} /> Open rating
-              </Btn>
-            )}
-            {p.state === "voting" && (
-              <Btn full variant="danger" onClick={() => close(p.id, p.votes)}>
-                <Square size={14} className="fill-current" /> Close rating ({p.votes} votes so far)
-              </Btn>
-            )}
-            {p.state === "closed" && !done && (
-              <Btn full variant="secondary" size="sm" onClick={() => confirm("Re-open rating? The current result is cleared.") && open(p.id)}>
-                Re-open rating
-              </Btn>
-            )}
-          </div>
+          <PitchPanel key={p.id} pitch={p} active={active?.id === p.id} timers={timers} offset={offset} matchDone={done} reload={reload} />
         ))
       )}
-      {pitches.length > 0 && <FinishButton match={match} reload={reload} label="Finish match (higher score advances)" />}
+
+      {bothDone && done && match.winnerTeam && (
+        <div className="flex items-center gap-3 rounded-lg bg-accent-soft p-3">
+          <TeamIcon teamId={match.winnerTeam} size={36} />
+          <div className="font-semibold">
+            Team {teamById(match.winnerTeam)?.name} wins
+            <span className="block text-sm font-normal text-muted">{match.stage === "final" ? "Shark Tank champions" : "and moves to the final"}</span>
+          </div>
+        </div>
+      )}
+      {bothDone && !done && (
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-warn">The scores are level. Pick the winner.</p>
+          <FinishButton match={match} reload={reload} label="Pick the winner" />
+        </div>
+      )}
     </Card>
+  );
+}
+
+function PitchPanel({
+  pitch,
+  active,
+  timers,
+  offset,
+  matchDone,
+  reload,
+}: {
+  pitch: Pitch;
+  active: boolean;
+  timers: { prep: number; pitch: number; vote: number };
+  offset: number;
+  matchDone: boolean;
+  reload: () => void;
+}) {
+  const now = useClock(offset);
+  const [busy, setBusy] = useState(false);
+  const ph = pitch.phase;
+
+  const next =
+    ph === "idle"
+      ? { label: `Start preparation (${mmss(timers.prep)})`, phase: "prep" }
+      : ph === "prep"
+        ? { label: `Start pitch (${mmss(timers.pitch)})`, phase: "pitching" }
+        : ph === "pitching"
+          ? { label: `Open voting (${mmss(timers.vote)})`, phase: "voting" }
+          : null;
+
+  async function go(phase: string) {
+    setBusy(true);
+    if (await call(`/admin/pitches/${pitch.id}/phase`, { phase })) reload();
+    setBusy(false);
+  }
+
+  async function save() {
+    setBusy(true);
+    try {
+      const r = await api<{ winner: number | null; tie: boolean }>(`/admin/pitches/${pitch.id}/close`, { body: {} });
+      if (r.winner) toast(`Team ${teamById(r.winner)?.name} wins the round`);
+      reload();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "";
+      if (/Only \d+ votes/.test(msg) && confirm(`${msg}\n\nSave anyway with ${pitch.votes} votes?`)) {
+        await call(`/admin/pitches/${pitch.id}/close`, { force: true });
+        reload();
+      } else toastError(e);
+    }
+    setBusy(false);
+  }
+
+  async function restart() {
+    if (!confirm("Start this team's turn over? Their votes and score are cleared.")) return;
+    if (await call(`/admin/pitches/${pitch.id}/reset`)) reload();
+  }
+
+  async function editItem() {
+    const item = prompt("Veggie or fruit for this team", pitch.item);
+    if (item && (await call(`/admin/pitches/${pitch.id}`, { item }, "PATCH"))) reload();
+  }
+
+  return (
+    <div className={`space-y-3 rounded-xl border p-3 ${active ? "border-accent bg-surface ring-1 ring-accent/30" : "border-line bg-sunken"}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <TeamName teamId={pitch.teamId} size={30} className="font-semibold" />
+          <div className="mt-0.5 text-xs text-muted">{pitch.ord === 1 ? "Pitches first" : "Pitches second"}</div>
+        </div>
+        {ph === "done" ? (
+          <span className="text-2xl font-semibold tabular-nums">
+            {pitch.avg?.toFixed(1)}
+            <span className="text-sm font-normal text-subtle"> ({pitch.votes} votes)</span>
+          </span>
+        ) : (
+          <PhaseChip phase={ph} />
+        )}
+      </div>
+
+      <button className="text-left text-sm text-muted underline decoration-dotted underline-offset-4" onClick={editItem}>
+        Pitching: {pitch.item} (tap to change)
+      </button>
+
+      {active && (
+        <>
+          <PhaseSteps phase={ph} />
+          <div className="rounded-lg bg-sunken py-3">
+            <PhaseTimer phase={ph} endsAt={pitch.phaseEndsAt} now={now} />
+          </div>
+          {ph === "voting" && (
+            <p className="text-center text-sm font-medium text-muted">
+              {pitch.votes} {pitch.votes === 1 ? "vote" : "votes"} so far. Everyone except Team {teamById(pitch.teamId)?.name} is rating.
+            </p>
+          )}
+          {next && (
+            <Btn full size="lg" busy={busy} onClick={() => go(next.phase)}>
+              <Play size={16} /> {next.label}
+            </Btn>
+          )}
+          {ph === "voting" && (
+            <Btn full size="lg" variant="danger" busy={busy} onClick={save}>
+              <Square size={14} className="fill-current" /> Save result
+            </Btn>
+          )}
+        </>
+      )}
+      {!active && ph === "idle" && <p className="text-sm text-muted">Waiting for the first team's turn to finish.</p>}
+
+      {!matchDone && (ph !== "idle" || false) && (
+        <button className="text-sm font-semibold text-accent" onClick={restart}>
+          Restart this turn
+        </button>
+      )}
+    </div>
   );
 }
 

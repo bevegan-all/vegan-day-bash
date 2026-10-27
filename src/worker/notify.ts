@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { HttpError, now, type AppEnv, type Env, type User } from "./lib";
+import { HttpError, getSettings, now, type AppEnv, type Env, type User } from "./lib";
 
 export const notifyRoutes = new Hono<AppEnv>();
 
@@ -29,10 +29,10 @@ export async function notifyRemoved(env: Env, gameId: number, userId: number) {
     .run();
 }
 
-// One light call, polled for the whole app: new alerts, live games, and any pitch being rated.
+// One light call, polled for the whole app: new alerts, live games, and the Shark Tank turn in progress.
 notifyRoutes.get("/pulse", async (c) => {
   const user = need(c.get("user"));
-  const [notifs, live, mine, voting] = await Promise.all([
+  const [notifs, live, mine, pitches, settings] = await Promise.all([
     c.env.DB.prepare(
       `SELECT id, kind, title, body, game_id AS gameId, created_at AS at FROM notifications
         WHERE user_id = ? AND read_at IS NULL ORDER BY id DESC LIMIT 20`,
@@ -42,19 +42,58 @@ notifyRoutes.get("/pulse", async (c) => {
     c.env.DB.prepare("SELECT id, slug, name, kind, type, location FROM games WHERE status = 'live' ORDER BY sort").all<{ id: number }>(),
     c.env.DB.prepare("SELECT game_id FROM game_players WHERE user_id = ?").bind(user.id).all<{ game_id: number }>(),
     c.env.DB.prepare(
-      `SELECT p.id, p.item, p.team_id, t.name AS team_name, m.game_id,
-              (SELECT rating FROM pitch_votes v WHERE v.pitch_id = p.id AND v.voter_id = ?) AS my_rating
-         FROM pitches p JOIN teams t ON t.id = p.team_id JOIN matches m ON m.id = p.match_id
-        WHERE p.state = 'voting' LIMIT 1`,
-    )
-      .bind(user.id)
-      .first<{ id: number; item: string; team_id: number; team_name: string; game_id: number; my_rating: number | null }>(),
+      `SELECT p.id, p.match_id, p.team_id, p.item, p.ord, p.phase, p.phase_ends_at, m.stage, m.team_a, m.team_b, m.game_id, t.name AS team_name
+         FROM pitches p JOIN matches m ON m.id = p.match_id JOIN teams t ON t.id = p.team_id
+        WHERE m.status = 'live' ORDER BY m.id, p.ord`,
+    ).all<{
+      id: number;
+      match_id: number;
+      team_id: number;
+      item: string;
+      ord: number;
+      phase: string;
+      phase_ends_at: number | null;
+      stage: string;
+      team_a: number;
+      team_b: number;
+      game_id: number;
+      team_name: string;
+    }>(),
+    getSettings(c.env),
   ]);
   const inGames = new Set(mine.results.map((r) => r.game_id));
+
+  // the turn in progress: the first pitch of a live round that is not finished
+  const cur = pitches.results.find((p) => p.phase !== "done");
+  let shark = null;
+  if (cur) {
+    const opponent = cur.team_id === cur.team_a ? cur.team_b : cur.team_a;
+    let myRating: number | null = null;
+    if (cur.phase === "voting") {
+      const v = await c.env.DB.prepare("SELECT rating FROM pitch_votes WHERE pitch_id = ? AND voter_id = ?").bind(cur.id, user.id).first<{ rating: number }>();
+      myRating = v?.rating ?? null;
+    }
+    shark = {
+      gameId: cur.game_id,
+      matchId: cur.match_id,
+      stage: cur.stage,
+      pitchId: cur.id,
+      teamId: cur.team_id,
+      teamName: cur.team_name,
+      item: cur.item,
+      ord: cur.ord,
+      phase: cur.phase,
+      endsAt: cur.phase_ends_at,
+      youPitching: user.team_id === cur.team_id,
+      canVote: user.team_id != null && user.team_id !== cur.team_id && !(settings.shark_block_opponent === "1" && user.team_id === opponent),
+      myRating,
+    };
+  }
   return c.json({
+    serverNow: now(),
     notifications: notifs.results,
     live: live.results.map((g) => ({ ...g, youIn: inGames.has(g.id) })),
-    voting: voting ? { ...voting, canVote: voting.team_id !== user.team_id, voted: voting.my_rating != null } : null,
+    shark,
   });
 });
 

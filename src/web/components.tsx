@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Check, Crown, MapPin } from "lucide-react";
 import { teamById } from "../shared/teams";
-import { api, fmtTime, stageLabel, type Board, type Finisher, type Match, type Pitch } from "./api";
+import { PHASE_LABEL, api, fmtTime, stageLabel, type Board, type Finisher, type Match, type Pitch } from "./api";
 import { GameArt, TeamIcon } from "./art";
 import { Card, RankBadge, StatusPill, TeamChip, TeamMark, toast, toastError } from "./ui";
 
@@ -243,24 +243,18 @@ export function MatchCard({ match, kind, onChanged }: { match: Match; kind: "mem
             <div key={p.id} className={`rounded-lg border p-3 ${winner === p.teamId ? "border-accent bg-accent-soft" : "border-line bg-sunken"}`}>
               <div className="flex items-center justify-between gap-2">
                 <TeamLine id={p.teamId} />
-                {p.state === "closed" && (
+                {p.phase === "done" ? (
                   <span className="text-2xl font-semibold tabular-nums">
                     {p.avg?.toFixed(1)}
                     <span className="text-sm font-normal text-subtle"> / 10</span>
                   </span>
-                )}
-                {p.state === "voting" && <StatusPill status="live" />}
-                {p.state === "pending" && <span className="text-xs font-semibold text-subtle">Waiting</span>}
-              </div>
-              <div className="mt-1 text-sm text-muted">Pitching: {p.item}</div>
-              {p.state === "voting" &&
-                (p.canVote ? (
-                  <div className="mt-3">
-                    <RatingPicker pitch={p} onDone={onChanged} />
-                  </div>
                 ) : (
-                  <p className="mt-2 text-sm font-medium text-muted">Your team is pitching, so you can't rate this one. Good luck.</p>
-                ))}
+                  <span className={`text-xs font-semibold ${p.phase === "idle" ? "text-subtle" : "text-accent"}`}>{PHASE_LABEL[p.phase]}</span>
+                )}
+              </div>
+              <div className="mt-1 text-sm text-muted">
+                {p.ord === 1 ? "Pitches first" : "Pitches second"} · {p.item}
+              </div>
               {winner === p.teamId && (
                 <div className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-accent">
                   <Crown size={13} /> Advances

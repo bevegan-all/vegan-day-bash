@@ -36,6 +36,16 @@ The app follows the phone's setting by default. The sun/moon button in the top b
 - Organisers then record each finisher's **time in seconds**. The fastest time wins, the top three show on a podium, and team points follow the times (winner's team +10, each other finisher's team +1 by default).
 - Alerts show as a bell in the app and as a phone notification **while the app is open** (including in the background). A phone where the browser is completely closed will not get them, because that needs a push service, which is a bigger add-on.
 
+### Shark Tank, turn by turn
+
+1. On the Shark Tank control screen, pick who plays whom (two rounds). Matchups can be changed until a round starts.
+2. Open a round and choose **which team pitches first**. A veggie or fruit is drawn for each team.
+3. For each team in turn, the organiser presses one button at a time: **Start preparation** (5 min), **Start pitch** (3 min), **Open voting** (1 min), then **Save result**.
+4. Everyone except the pitching team rates the pitch from 1 to 10 on their phone while voting is open. The average is saved as the team's score.
+5. When both teams have pitched, the higher average wins and moves to the final automatically (a tie asks the organiser to pick).
+
+Players see whose turn it is, the phase and a live countdown on Home and on the game page. The countdowns come from the server clock, so every phone shows the same time. The three durations are in **Settings** (set them to a few seconds to rehearse).
+
 ### Checks
 
 `npm run typecheck` checks all the code. `scripts/flow-test.mjs` is an end-to-end API test. It needs a throwaway database, so run it like this and your own local data stays untouched:

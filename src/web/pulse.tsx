@@ -39,8 +39,10 @@ export async function enableAlerts(): Promise<AlertState> {
 interface PulseState {
   pulse: Pulse | null;
   reload: () => void;
+  /** server clock minus this phone's clock, so countdowns match on every phone */
+  offset: number;
 }
-const PulseCtx = createContext<PulseState>({ pulse: null, reload: () => {} });
+const PulseCtx = createContext<PulseState>({ pulse: null, reload: () => {}, offset: 0 });
 export const usePulse = () => useContext(PulseCtx);
 
 function announce(n: AppNotification) {
@@ -51,8 +53,17 @@ function announce(n: AppNotification) {
 
 export function PulseProvider({ children }: { children: ReactNode }) {
   const { me } = useAuth();
-  const { data, reload } = usePoll<Pulse>(me ? "/pulse" : null, 20000);
+  // Check more often while a Shark Tank turn is running, so phase changes arrive quickly
+  const [every, setEvery] = useState(20000);
+  const { data, reload } = usePoll<Pulse>(me ? "/pulse" : null, every);
   const seen = useRef<Set<number> | null>(null);
+  const [offset, setOffset] = useState(0);
+
+  useEffect(() => {
+    if (!data) return;
+    setOffset(data.serverNow - Date.now());
+    setEvery(data.shark?.phase === "voting" ? 4000 : data.shark ? 8000 : 20000);
+  }, [data]);
 
   useEffect(() => {
     seen.current = null; // new person signed in (or out): start fresh
@@ -74,7 +85,7 @@ export function PulseProvider({ children }: { children: ReactNode }) {
     }
   }, [data]);
 
-  return <PulseCtx.Provider value={{ pulse: data, reload }}>{children}</PulseCtx.Provider>;
+  return <PulseCtx.Provider value={{ pulse: data, reload, offset }}>{children}</PulseCtx.Provider>;
 }
 
 // ---------- bell in the header ----------

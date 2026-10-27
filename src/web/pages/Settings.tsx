@@ -16,6 +16,9 @@ const POINT_FIELDS: [string, string][] = [
   ["pts_greenred_cleared", "Each person who cleared (their team)"],
   ["participation_points", "Solo games: points for just playing"],
   ["shark_min_votes", "Shark Tank: minimum votes to close a pitch"],
+  ["shark_prep_seconds", "Shark Tank: preparation time (seconds)"],
+  ["shark_pitch_seconds", "Shark Tank: pitch time (seconds)"],
+  ["shark_vote_seconds", "Shark Tank: voting time (seconds)"],
 ];
 
 export function Settings() {

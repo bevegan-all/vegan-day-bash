@@ -9,6 +9,7 @@ import { TeamIcon } from "../art";
 import { BoardList, GameCard, GameThumb, LocationTag, MatchCard, Podium } from "../components";
 import { SharkLiveCard } from "../shark";
 import { MemeLiveCard } from "../meme";
+import { ActOutLiveCard, ActOutSummary } from "../actout";
 import { AlertsToggle, usePulse } from "../pulse";
 import { InstallCard } from "../install";
 import { Avatar, Btn, Card, ErrorBox, Page, RankBadge, SectionLabel, Segmented, Spinner, StatusPill, TeamChip, TeamMark, ThemeSelect } from "../ui";
@@ -56,6 +57,7 @@ export function Home() {
 
       {pulse?.shark && <SharkLiveCard shark={pulse.shark} offset={offset} onVoted={reloadPulse} />}
       {pulse?.meme && <MemeLiveCard meme={pulse.meme} offset={offset} />}
+      {pulse?.actout && <ActOutLiveCard a={pulse.actout} offset={offset} onVoted={reloadPulse} />}
 
       {live.length > 0 && (
         <section>
@@ -170,7 +172,14 @@ export function GameView() {
   const { pulse, reload: reloadPulse, offset } = usePulse();
   const turn = pulse?.shark && String(pulse.shark.gameId) === id ? pulse.shark : null;
   const memeTurn = pulse?.meme && String(pulse.meme.gameId) === id ? pulse.meme : null;
-  const turnKey = turn ? `${turn.pitchId}:${turn.phase}` : memeTurn ? `m${memeTurn.turnId}:${memeTurn.phase}:${memeTurn.last?.ord ?? 0}` : "";
+  const actRound = pulse?.actout && String(pulse.actout.gameId) === id ? pulse.actout : null;
+  const turnKey = turn
+    ? `${turn.pitchId}:${turn.phase}`
+    : memeTurn
+      ? `m${memeTurn.turnId}:${memeTurn.phase}:${memeTurn.last?.ord ?? 0}`
+      : actRound
+        ? `a${actRound.roundId}:${actRound.phase}:${actRound.turns.map((x) => x.phase[0]).join("")}`
+        : "";
   useEffect(() => {
     if (turnKey) reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -195,6 +204,7 @@ export function GameView() {
           <GameThumb slug={data.slug} name={data.name} className="aspect-[16/7] w-full rounded-xl border border-line" />
           {turn && <SharkLiveCard shark={turn} offset={offset} onVoted={reloadPulse} />}
           {memeTurn && <MemeLiveCard meme={memeTurn} offset={offset} />}
+          {actRound && <ActOutLiveCard a={actRound} offset={offset} onVoted={reloadPulse} />}
           <Card>
             <div className="mb-3 flex items-center gap-2">
               <StatusPill status={data.status} />
@@ -221,6 +231,8 @@ export function GameView() {
               <BoardList board={data.board as Board} empty="No scores yet. Find an organiser to play." />
             </Card>
           )}
+
+          {data.type === "actout" && <ActOutSummary game={data} />}
 
           {data.type === "activity" && <Card className="text-center text-sm text-muted">Just for fun. Watch the screen and join in.</Card>}
         </>

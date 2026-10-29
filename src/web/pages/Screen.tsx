@@ -3,6 +3,7 @@ import { Crown } from "lucide-react";
 import { teamById } from "../../shared/teams";
 import { usePoll, stageLabel, type Board, type GameDetail, type Match, type Pitch, type TeamRow } from "../api";
 import { ActTimer, TurnTracker } from "../meme";
+import { RoundResults, TeamOrder } from "../actout";
 import { PhaseChip, PhaseTimer, useClock } from "../shark";
 import { GameArt, TeamIcon } from "../art";
 import { LocationTag, Podium } from "../components";
@@ -87,6 +88,61 @@ export function Screen() {
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+// Act It Out on the big screen: the round, the order, who is on now with a big clock, and the last result
+function ScreenActOut({ game }: { game: GameDetail }) {
+  const rounds = game.rounds ?? [];
+  const now = useClock((game.serverNow ?? Date.now()) - Date.now());
+  const active = rounds.find((r) => r.phase !== "done");
+  const lastDone = [...rounds].reverse().find((r) => r.phase === "done");
+  const voting = active?.phase === "voting";
+  const cur = active && !voting ? active.turns.find((x) => x.phase !== "done") : null;
+  const acting = cur?.phase === "acting";
+  return (
+    <div className="space-y-5">
+      {!active ? (
+        <div className="py-6 text-center text-3xl font-semibold">{rounds.length ? "That's all the rounds. Thanks for playing!" : "Act It Out starts soon"}</div>
+      ) : (
+        <>
+          <div className="flex items-end justify-between">
+            <span className="text-sm font-semibold uppercase tracking-widest text-subtle">
+              Round {active.ord} of {rounds.length}
+            </span>
+            {active.scene && <span className="text-3xl font-semibold">Scene: {active.scene}</span>}
+          </div>
+          <TeamOrder big turns={active.turns} />
+          <div className="rounded-xl bg-sunken p-5 text-center">
+            {voting ? (
+              <>
+                <div className="text-3xl font-semibold text-live">Rank the other teams on your phone</div>
+                <div className="mt-3">
+                  <ActTimer endsAt={active.phaseEndsAt} now={now} active big label="voting time left" />
+                </div>
+                <div className="mt-2 text-2xl text-muted tabular-nums">{active.votes} votes so far</div>
+              </>
+            ) : cur ? (
+              <>
+                <TeamName teamId={cur.teamId} size={64} className="justify-center text-5xl font-semibold" />
+                <div className="mt-1 text-2xl text-muted">{acting ? "is acting the scene" : "performs next"}</div>
+                <div className="mt-3">
+                  <ActTimer endsAt={cur.phaseEndsAt} now={now} active={acting} big />
+                </div>
+              </>
+            ) : (
+              <div className="py-4 text-3xl font-semibold">Every team has performed. Voting opens soon.</div>
+            )}
+          </div>
+        </>
+      )}
+      {lastDone && (
+        <div className="rounded-xl border border-line p-5">
+          <div className="mb-1 text-sm font-semibold uppercase tracking-widest text-subtle">Round {lastDone.ord} result</div>
+          <RoundResults results={lastDone.results} big />
+        </div>
+      )}
     </div>
   );
 }
@@ -224,6 +280,8 @@ function LiveGame({ game }: { game: GameDetail }) {
           {game.board.top.length === 0 && <li className="text-muted">Be the first on the board.</li>}
         </ol>
       )}
+
+      {game.type === "actout" && <ScreenActOut game={game} />}
 
       {game.type === "activity" && <div className="text-center text-3xl font-semibold">{game.description}</div>}
     </div>

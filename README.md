@@ -33,8 +33,27 @@ The app follows the phone's setting by default. The sun/moon button in the top b
 
 - Every game has a **location**, `Terrace` by default. An admin changes it on the game's control screen (Terrace, Hall, or any text). Players see it on the game cards and pages.
 - On **Green Light – Red Light**, organisers build a player list: add everyone, everyone checked in, a whole team, or individual people by scanning or searching. Each person added gets an alert saying they are in and where to go. Removing someone also alerts them.
-- Organisers then record each finisher's **time in seconds**. The fastest time wins, the top three show on a podium, and team points follow the times (winner's team +10, each other finisher's team +1 by default).
+- Organisers then record each finisher's **time in seconds**. The fastest time wins, the top three show on a podium, and the teams are ranked from the finishers: the team with the most finishers is 1st, and the fastest finisher breaks a tie. See the points table below.
 - Alerts show as a bell in the app and as a phone notification **while the app is open** (including in the background). A phone where the browser is completely closed will not get them, because that needs a push service, which is a bigger add-on.
+
+### Points in every team game
+
+| Game | Points |
+|---|---|
+| Act It Out (each round), Green Light – Red Light | 1st place **2**, 2nd and 3rd **1** each, 4th **0**. Teams that tie share the points of the places they fill. |
+| Meme Charades, Shark Tank | Semi-final winner **1**. The final winner gets **1 more**, so the champion ends with 2. |
+
+All of these can be changed in **Settings**.
+
+### Act It Out, round by round
+
+The movie scenes are shown on your projector. The app runs the order, the clocks and the vote.
+
+1. On the Act It Out control screen, press **Start the game**. It makes 5 rounds. In every round all four teams perform, and the order shifts by one team each round.
+2. For each team the organiser presses **Start** (1 minute clock) and then **Team is done**. The next team's Start button appears. A scene name can be typed in (optional).
+3. After the fourth team, press **Open voting**. Everyone ranks the **three other teams** best to worst (nobody ranks their own team), by tapping them in order.
+4. **Save result** scores the round: each team is scored by the average of its rankings, so uneven team sizes do not matter. Ties share the points.
+5. Players see the order, whose turn it is, the clock, and the previous round's result. The projector page shows the same.
 
 ### Meme Charades, turn by turn
 

@@ -19,6 +19,15 @@ export async function memeConfig(env: Env) {
   return { act: n("meme_act_seconds", 60), perTeam: n("meme_turns_per_team", 5), count: n("meme_count", 16) };
 }
 
+export async function actConfig(env: Env) {
+  const s = await getSettings(env);
+  const n = (k: string, d: number) => {
+    const v = Number(s[k]);
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : d;
+  };
+  return { act: n("actout_act_seconds", 60), vote: n("actout_vote_seconds", 60), rounds: n("actout_rounds", 5) };
+}
+
 export interface TurnPlayer {
   id: number;
   name: string;
@@ -142,6 +151,40 @@ export async function buildGameDetail(env: Env, gameId: number, viewer: User | n
       }
     }
     return { ...base, matches: out, serverNow: Date.now(), timers: game.type === "shark" ? await sharkTimers(env) : undefined, meme: game.type === "meme" ? await memeConfig(env) : undefined };
+  }
+
+  if (game.type === "actout") {
+    const [rounds, turns, results, ballots, mine, points] = await Promise.all([
+      env.DB.prepare("SELECT id, ord, scene, phase, phase_ends_at AS phaseEndsAt FROM act_rounds WHERE game_id = ? ORDER BY ord").bind(gameId).all<{ id: number; ord: number; scene: string | null; phase: string; phaseEndsAt: number | null }>(),
+      env.DB.prepare(
+        `SELECT t.id, t.round_id AS roundId, t.ord, t.team_id AS teamId, t.phase, t.phase_ends_at AS phaseEndsAt
+           FROM act_turns t JOIN act_rounds r ON r.id = t.round_id WHERE r.game_id = ? ORDER BY t.round_id, t.ord`,
+      ).bind(gameId).all<{ id: number; roundId: number; ord: number; teamId: number; phase: string; phaseEndsAt: number | null }>(),
+      env.DB.prepare(
+        `SELECT x.round_id AS roundId, x.team_id AS teamId, x.rank, x.points, x.avg, x.firsts, x.ballots
+           FROM act_results x JOIN act_rounds r ON r.id = x.round_id WHERE r.game_id = ? ORDER BY x.round_id, x.rank, x.team_id`,
+      ).bind(gameId).all<{ roundId: number; teamId: number; rank: number; points: number; avg: number; firsts: number; ballots: number }>(),
+      env.DB.prepare("SELECT v.round_id AS roundId, COUNT(*) AS n FROM act_votes v JOIN act_rounds r ON r.id = v.round_id WHERE r.game_id = ? GROUP BY v.round_id").bind(gameId).all<{ roundId: number; n: number }>(),
+      viewer
+        ? env.DB.prepare("SELECT v.round_id AS roundId, v.first_team AS a, v.second_team AS b, v.third_team AS c FROM act_votes v JOIN act_rounds r ON r.id = v.round_id WHERE r.game_id = ? AND v.voter_id = ?").bind(gameId, viewer.id).all<{ roundId: number; a: number; b: number; c: number }>()
+        : Promise.resolve({ results: [] as { roundId: number; a: number; b: number; c: number }[] }),
+      env.DB.prepare("SELECT team_id AS teamId, SUM(points) AS pts FROM team_points WHERE game_id = ? AND voided_at IS NULL GROUP BY team_id").bind(gameId).all<{ teamId: number; pts: number }>(),
+    ]);
+    const countOf = new Map(ballots.results.map((b) => [b.roundId, b.n]));
+    const myOf = new Map(mine.results.map((m) => [m.roundId, [m.a, m.b, m.c]]));
+    return {
+      ...base,
+      serverNow: Date.now(),
+      actout: await actConfig(env),
+      pointsByTeam: Object.fromEntries(points.results.map((p) => [p.teamId, Math.round(p.pts * 100) / 100])),
+      rounds: rounds.results.map((r) => ({
+        ...r,
+        turns: turns.results.filter((t) => t.roundId === r.id).map(({ roundId, ...t }) => t),
+        results: results.results.filter((x) => x.roundId === r.id).map(({ roundId, ...x }) => x),
+        votes: r.phase === "voting" || r.phase === "done" ? (countOf.get(r.id) ?? 0) : 0,
+        myRanking: myOf.get(r.id) ?? null,
+      })),
+    };
   }
 
   if (game.type === "greenred" || game.type === "individual") {

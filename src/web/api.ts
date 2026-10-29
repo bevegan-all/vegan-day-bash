@@ -83,7 +83,7 @@ export interface GameSummary {
   slug: string;
   name: string;
   kind: "team" | "individual";
-  type: "meme" | "greenred" | "shark" | "activity" | "individual";
+  type: "meme" | "greenred" | "shark" | "activity" | "actout" | "individual";
   resultType: string | null;
   description: string;
   status: "draft" | "upcoming" | "live" | "closed";
@@ -154,12 +154,30 @@ export interface MemeLive {
   last: { teamId: number; result: "point" | "fail"; ord: number } | null;
 }
 
+// The Act It Out round in progress, as seen by one person
+export interface ActOutLive {
+  gameId: number;
+  roundId: number;
+  ord: number;
+  total: number;
+  scene: string | null;
+  phase: "idle" | "performing" | "voting";
+  endsAt: number | null;
+  turns: { teamId: number; phase: "idle" | "acting" | "done"; endsAt: number | null }[];
+  current: { teamId: number; phase: "idle" | "acting" | "done"; endsAt: number | null } | null;
+  canVote: boolean;
+  eligible: number[];
+  myRanking: number[] | null;
+  last: { ord: number; results: { teamId: number; rank: number; points: number }[] } | null;
+}
+
 export interface Pulse {
   serverNow: number;
   notifications: AppNotification[];
   live: { id: number; slug: string; name: string; kind: string; type: string; location: string; youIn: boolean }[];
   shark: SharkLive | null;
   meme: MemeLive | null;
+  actout: ActOutLive | null;
 }
 
 export const fmtTime = (s: number) => {
@@ -229,6 +247,35 @@ export interface MemeTurn {
   meme?: string | null;
 }
 
+export interface ActTurn {
+  id: number;
+  ord: number;
+  teamId: number;
+  phase: "idle" | "acting" | "done";
+  phaseEndsAt: number | null;
+}
+
+export interface ActResult {
+  teamId: number;
+  rank: number;
+  points: number;
+  avg: number;
+  firsts: number;
+  ballots: number;
+}
+
+export interface ActRound {
+  id: number;
+  ord: number;
+  scene: string | null;
+  phase: "idle" | "performing" | "voting" | "done";
+  phaseEndsAt: number | null;
+  turns: ActTurn[];
+  results: ActResult[];
+  votes: number;
+  myRanking: number[] | null;
+}
+
 export interface Match {
   id: number;
   stage: "semi1" | "semi2" | "final";
@@ -246,6 +293,9 @@ export interface GameDetail extends GameSummary {
   serverNow?: number;
   timers?: { prep: number; pitch: number; vote: number };
   meme?: { act: number; perTeam: number; count: number };
+  rounds?: ActRound[];
+  actout?: { act: number; vote: number; rounds: number };
+  pointsByTeam?: Record<number, number>;
   matches?: Match[];
   board?: Board;
   recent?: { id: number; value: number; at: number; name: string; teamId: number | null; matchRef: string | null }[];

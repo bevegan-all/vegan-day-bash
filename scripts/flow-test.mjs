@@ -198,12 +198,12 @@ ok(r.status === 200 && r.j.winner === 4, "Pig wins the final (4 to 2)");
 let tb = (await users[0].c.req("/leaderboard/teams")).j.teams;
 const pts = Object.fromEntries(tb.map((t) => [t.teamId, t.total]));
 console.log("points after meme:", pts);
-ok(pts[1] === 8 && pts[4] === 15 && pts[2] === 0 && pts[3] === 0, "meme points: Cow 5+3, Pig 5+10");
+ok(pts[1] === 1 && pts[4] === 2 && pts[2] === 0 && pts[3] === 0, "meme points: Cow 1 (semi win), Pig 2 (semi win + final win)");
 pu = (await users[0].c.req("/pulse")).j;
 ok(pu.meme === null, "no turn in progress after the final");
 r = await admin.req(`/admin/matches/${fin.id}/finish`, {});
 tb = (await users[0].c.req("/leaderboard/teams")).j.teams;
-ok(tb.find((t) => t.teamId === 4).total === 15, "re-finishing does not double points");
+ok(tb.find((t) => t.teamId === 4).total === 2, "re-finishing does not double points");
 
 // ---- Shark Tank: turn by turn
 const shark = g("shark-tank");
@@ -306,7 +306,7 @@ ok(d.matches[0].status === "done" && d.matches[0].winnerTeam === expectedWinner,
 pl = (await goatU[0].c.req("/pulse")).j;
 ok(pl.shark === null, "no turn in progress after the round");
 tb = (await users[0].c.req("/leaderboard/teams")).j.teams;
-ok(Math.abs(tb.find((t) => t.teamId === 1).total - (8 + Math.round(cowAvg * 10) / 10)) < 0.01, "Cow has meme points plus its Shark Tank score");
+ok(tb.find((t) => t.teamId === 1).total === 1 + (expectedWinner === 1 ? 1 : 0), "Shark Tank: the round winner gets 1 point, the audience score adds none");
 
 // restart a turn: reset the second round's first team after a mistake
 const sm2 = d.matches[1]; // Chicken v Pig
@@ -431,9 +431,24 @@ const order = det.greenred.finishers.map((f) => f.userId);
 ok(JSON.stringify(order) === JSON.stringify([users[1].id, users[2].id, users[3].id, users[0].id, users[4].id]), "finishers ordered fastest first (podium = top 3)");
 ok(det.greenred.finishers[0].seconds === 11.5 && det.greenred.finishers[0].rank === 1, "winner has the fastest time");
 
+// teams are ranked by number of finishers (fastest finisher breaks a tie); positions pay 2 / 1 / 1 / 0, ties share
 const expectDelta = (finishers) => {
-  const d = {};
-  finishers.forEach((f, i) => { d[f.team] = (d[f.team] ?? 0) + (i === 0 ? 10 : 1); });
+  const stats = [1, 2, 3, 4].map((id) => {
+    const mine = finishers.filter((f) => f.team === id);
+    return { id, count: mine.length, best: mine.length ? Math.min(...mine.map((f) => f.seconds)) : Infinity };
+  });
+  stats.sort((a, b) => b.count - a.count || a.best - b.best || a.id - b.id);
+  const table = [2, 1, 1, 0], d = {};
+  let pos = 0, i = 0;
+  while (i < stats.length) {
+    let j = i;
+    while (j + 1 < stats.length && stats[j + 1].count === stats[i].count && stats[j + 1].best === stats[i].best) j++;
+    const size = j - i + 1;
+    const pts = table.slice(pos, pos + size).reduce((a, b) => a + b, 0) / size;
+    for (let k = i; k <= j; k++) d[stats[k].id] = pts;
+    pos += size;
+    i = j + 1;
+  }
   return d;
 };
 const teamOf = (id) => users.find((u) => u.id === id).team;
@@ -443,19 +458,19 @@ const checkPoints = async (finishers, label) => {
   const good = [1, 2, 3, 4].every((t) => Math.abs((now[t] - teamsBefore[t]) - (exp[t] ?? 0)) < 0.01);
   ok(good, label);
 };
-await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId) })), "team points: winner team +10, other finishers +1 each");
+await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId), seconds: f.seconds })), "team points: teams ranked by finishers, paid 2 / 1 / 1 / 0");
 
 // re-record the winner with a slower time: someone else wins, no double counting
 await admin.req(`/admin/games/${gr.id}/finish`, { userId: users[1].id, seconds: 15 });
 det = (await admin.req(`/admin/games/${gr.id}`)).j;
 ok(det.greenred.finishers[0].userId === users[2].id && det.greenred.finishers.length === 5, "re-recording replaces the time and changes the winner");
-await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId) })), "points recomputed after re-recording");
+await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId), seconds: f.seconds })), "points recomputed after re-recording");
 
 // void the winner's time
 r = await admin.req(`/admin/results/${det.greenred.finishers[0].resultId}`, undefined, "DELETE");
 det = (await admin.req(`/admin/games/${gr.id}`)).j;
 ok(det.greenred.finishers.length === 4, "removing a time works");
-await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId) })), "points recomputed after removing a time");
+await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId), seconds: f.seconds })), "points recomputed after removing a time");
 
 // someone who finishes without being added is added silently
 const before = (await users[11].c.req("/pulse")).j.notifications.length;
@@ -483,6 +498,131 @@ const look = await admin.req(`/admin/lookup?code=${encodeURIComponent(q.j.code)}
 ok(look.status === 200 && look.j.id === users[0].id, "identity QR lookup works");
 const forged = await admin.req(`/admin/lookup?code=${encodeURIComponent("VDB1." + users[0].id + ".0000000000000000")}`);
 ok(forged.status === 404, "forged QR rejected");
+
+// ---- Act It Out: rounds, a turn for every team, and a public ranking
+{
+  const actG = g("act-it-out");
+  ok(actG.type === "actout", "Act It Out is its own game type");
+  await admin.req("/admin/settings", { actout_act_seconds: 60, actout_vote_seconds: 30 }, "PUT");
+  const totalsNow = async () => Object.fromEntries((await users[0].c.req("/leaderboard/teams")).j.teams.map((x) => [x.teamId, x.total]));
+  const before = await totalsNow();
+  const actDetail = async () => (await admin.req(`/admin/games/${actG.id}`)).j;
+  const cowU2 = users.filter((u) => u.team === 1), chickU2 = users.filter((u) => u.team === 2), goatU2 = users.filter((u) => u.team === 3), pigU2 = users.filter((u) => u.team === 4);
+
+  r = await admin.req(`/admin/games/${actG.id}/actout/start`, {});
+  ok(r.status === 200, "Act It Out rounds created");
+  r = await admin.req(`/admin/games/${actG.id}/actout/start`, {});
+  ok(r.status === 409, "the rounds can only be created once");
+  let ad = await actDetail();
+  ok(ad.rounds.length === 5 && ad.rounds.every((x) => x.turns.length === 4), "5 rounds, 4 teams in each");
+  ok(JSON.stringify(ad.rounds[0].turns.map((x) => x.teamId)) === "[1,2,3,4]" && JSON.stringify(ad.rounds[1].turns.map((x) => x.teamId)) === "[2,3,4,1]", "the order shifts by one team each round");
+  ok(ad.actout.act === 60 && ad.actout.rounds === 5, "1 minute per team, 5 rounds");
+
+  let pz = (await users[0].c.req("/pulse")).j;
+  ok(pz.actout && pz.actout.ord === 1 && pz.actout.total === 5 && pz.actout.phase === "idle" && pz.actout.current.teamId === 1 && pz.actout.current.phase === "idle", "players see round 1 of 5, Cow is up next");
+
+  const rd1 = ad.rounds[0];
+  r = await admin.req(`/admin/act-turns/${rd1.turns[1].id}/start`, {});
+  ok(r.status === 409, "the second team can't start before the first has finished");
+  const t0 = Date.now();
+  r = await admin.req(`/admin/act-turns/${rd1.turns[0].id}/start`, { scene: "Titanic" });
+  ok(r.status === 200 && Math.abs(r.j.endsAt - t0 - 60000) < 3000, "each team gets a 1 minute clock");
+  r = await admin.req(`/admin/act-turns/${rd1.turns[0].id}/start`, {});
+  ok(r.status === 409, "pressing Start twice only starts the team once");
+  pz = (await users[1].c.req("/pulse")).j;
+  ok(pz.actout.phase === "performing" && pz.actout.current.phase === "acting" && pz.actout.scene === "Titanic" && pz.actout.current.endsAt > pz.serverNow, "everyone sees Cow performing, the scene and the clock");
+  r = await admin.req(`/admin/act-rounds/${rd1.id}/open-voting`, {});
+  ok(r.status === 409, "voting can't open before every team has performed");
+  r = await admin.req(`/admin/act-turns/${rd1.turns[0].id}/done`, {});
+  ok(r.status === 200, "organiser marks Cow as done");
+  r = await admin.req(`/admin/act-turns/${rd1.turns[0].id}/done`, {});
+  ok(r.status === 409, "a team can only be marked done once");
+  pz = (await users[1].c.req("/pulse")).j;
+  ok(pz.actout.current.teamId === 2 && pz.actout.current.phase === "idle", "the next team's start button comes up (Chicken)");
+  for (const turn of rd1.turns.slice(1)) {
+    await admin.req(`/admin/act-turns/${turn.id}/start`, {});
+    await admin.req(`/admin/act-turns/${turn.id}/done`, {});
+  }
+  r = await users[0].c.req(`/admin/act-rounds/${rd1.id}/open-voting`, {});
+  ok(r.status === 403, "players can't open voting");
+  r = await admin.req(`/admin/act-rounds/${rd1.id}/open-voting`, {});
+  ok(r.status === 200 && Math.abs(r.j.endsAt - Date.now() - 30000) < 3000, "voting opened (30 second window)");
+
+  pz = (await cowU2[0].c.req("/pulse")).j;
+  ok(pz.actout.phase === "voting" && pz.actout.canVote && JSON.stringify(pz.actout.eligible) === "[2,3,4]" && pz.actout.myRanking === null, "a Cow voter is offered the other three teams");
+  r = await cowU2[0].c.req(`/act-rounds/${rd1.id}/vote`, { ranking: [1, 2, 3] });
+  ok(r.status === 400, "you can't rank your own team");
+  r = await cowU2[0].c.req(`/act-rounds/${rd1.id}/vote`, { ranking: [2, 2, 3] });
+  ok(r.status === 400, "each team can be ranked only once");
+  r = await cowU2[0].c.req(`/act-rounds/${rd1.id}/vote`, { ranking: [2, 3] });
+  ok(r.status === 400, "all three other teams must be ranked");
+  r = await new Client().req(`/act-rounds/${rd1.id}/vote`, { ranking: [2, 3, 4] });
+  ok(r.status === 401, "signed-out people can't vote");
+
+  // the crowd's order of merit: Goat, Pig, Cow, Chicken
+  const merit = [3, 4, 1, 2];
+  const ballot = (team) => merit.filter((x) => x !== team);
+  await cowU2[0].c.req(`/act-rounds/${rd1.id}/vote`, { ranking: [4, 3, 2] }); // changes their mind below
+  for (const [team, list] of [[1, cowU2], [2, chickU2], [3, goatU2], [4, pigU2]]) {
+    for (const u of list) {
+      r = await u.c.req(`/act-rounds/${rd1.id}/vote`, { ranking: ballot(team) });
+      if (r.status !== 200) ok(false, "vote from team " + team);
+    }
+  }
+  pz = (await cowU2[0].c.req("/pulse")).j;
+  ok(JSON.stringify(pz.actout.myRanking) === JSON.stringify(ballot(1)), "a voter's last ballot is the one that counts");
+  ad = await actDetail();
+  ok(ad.rounds[0].votes === 12, "12 people voted, one ballot each (changing your mind doesn't add one)");
+
+  r = await admin.req(`/admin/act-rounds/${rd1.id}/close`, {});
+  ok(r.status === 200 && r.j.ballots === 12, "round 1 saved");
+  const byTeam = Object.fromEntries(r.j.results.map((x) => [x.id, x]));
+  ok(byTeam[3].rank === 1 && byTeam[3].points === 2 && byTeam[4].rank === 2 && byTeam[4].points === 1 && byTeam[1].rank === 3 && byTeam[1].points === 1 && byTeam[2].rank === 4 && byTeam[2].points === 0, "positions pay 2 / 1 / 1 / 0 (Goat, Pig, Cow, Chicken)");
+  const after1 = await totalsNow();
+  ok(after1[3] - before[3] === 2 && after1[4] - before[4] === 1 && after1[1] - before[1] === 1 && after1[2] - before[2] === 0, "team points were added to the leaderboard");
+  r = await cowU2[0].c.req(`/act-rounds/${rd1.id}/vote`, { ranking: ballot(1) });
+  ok(r.status === 409, "no voting after the round is saved");
+  r = await admin.req(`/admin/act-rounds/${rd1.id}/close`, {});
+  ok(r.status === 409, "a round can only be saved once");
+
+  // round 2 is next, and players can see how round 1 ended
+  pz = (await users[0].c.req("/pulse")).j;
+  ok(pz.actout.ord === 2 && pz.actout.current.teamId === 2 && pz.actout.last.ord === 1 && pz.actout.last.results[0].teamId === 3, "round 2 starts with Chicken; players see round 1's result");
+  ad = await actDetail();
+  const rd2 = ad.rounds[1];
+  r = await admin.req(`/admin/act-turns/${rd2.turns[0].id}/start`, {});
+  ok(r.status === 200, "round 2 can begin");
+  await admin.req(`/admin/act-turns/${rd2.turns[0].id}/done`, {});
+  for (const turn of rd2.turns.slice(1)) {
+    await admin.req(`/admin/act-turns/${turn.id}/start`, {});
+    await admin.req(`/admin/act-turns/${turn.id}/done`, {});
+  }
+  await admin.req(`/admin/act-rounds/${rd2.id}/open-voting`, {});
+  r = await admin.req(`/admin/act-rounds/${rd2.id}/close`, {});
+  ok(r.status === 409 && /vote/i.test(r.j.error), "a round with no votes isn't saved by accident");
+  r = await admin.req(`/admin/act-rounds/${rd2.id}/close`, { force: true });
+  ok(r.status === 200 && r.j.results.every((x) => x.points === 1), "if it is saved anyway, four equal teams share the points (1 each)");
+  const after2 = await totalsNow();
+  ok([1, 2, 3, 4].every((id) => Math.abs(after2[id] - after1[id] - 1) < 0.01), "each team got 1 point for the level round");
+
+  // restarting a round clears its votes and points
+  r = await admin.req(`/admin/act-rounds/${rd2.id}/reset`, {});
+  ok(r.status === 200, "the latest round can be restarted");
+  const after3 = await totalsNow();
+  ok([1, 2, 3, 4].every((id) => Math.abs(after3[id] - after1[id]) < 0.01), "restarting a round takes its points back");
+  r = await admin.req(`/admin/act-rounds/${rd2.id}/open-voting`, {});
+  ok(r.status === 409, "a restarted round must be performed again before voting");
+  await admin.req(`/admin/act-turns/${rd2.turns[0].id}/start`, {});
+  r = await admin.req(`/admin/act-rounds/${rd1.id}/reset`, {});
+  ok(r.status === 409, "an earlier round can't be restarted once a later round has begun");
+  await admin.req(`/admin/act-turns/${rd2.turns[0].id}/reset`, {});
+  r = await admin.req(`/admin/act-rounds/${rd1.id}/reset`, {});
+  ok(r.status === 200, "an earlier round can be restarted when the later ones are untouched");
+  const after4 = await totalsNow();
+  ok([1, 2, 3, 4].every((id) => Math.abs(after4[id] - before[id]) < 0.01), "restarting round 1 takes its points back too");
+  ad = await actDetail();
+  ok(ad.rounds[0].phase === "idle" && ad.rounds[0].votes === 0 && ad.rounds[0].results.length === 0, "round 1 is back to the start with no votes or results");
+}
 
 // ---- one-time sign-in code (moves a sign-in into the installed app)
 const hand = await users[3].c.req("/auth/handoff", {});

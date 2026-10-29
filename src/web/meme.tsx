@@ -11,7 +11,7 @@ import { Card, TeamName } from "./ui";
 // ---------------------------------------------------------------------------
 
 // Countdown for one acting turn
-export function ActTimer({ endsAt, now, active, big }: { endsAt: number | null; now: number; active: boolean; big?: boolean }) {
+export function ActTimer({ endsAt, now, active, big, label = "acting time left" }: { endsAt: number | null; now: number; active: boolean; big?: boolean; label?: string }) {
   const left = endsAt ? endsAt - now : 0;
   const over = active && !!endsAt && left <= 0;
   return (
@@ -19,7 +19,7 @@ export function ActTimer({ endsAt, now, active, big }: { endsAt: number | null; 
       <div className={`font-semibold tabular-nums tracking-tight ${big ? "text-8xl" : "text-5xl"} ${over ? "text-live" : ""}`}>
         {active && endsAt ? (over ? "0:00" : fmtClock(left)) : "–:––"}
       </div>
-      <div className={`${big ? "text-2xl" : "text-sm"} font-medium text-muted`}>{over ? "Time's up" : active ? "acting time left" : "Waiting to start"}</div>
+      <div className={`${big ? "text-2xl" : "text-sm"} font-medium text-muted`}>{over ? "Time's up" : active ? label : "Waiting to start"}</div>
     </div>
   );
 }

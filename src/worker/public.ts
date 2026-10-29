@@ -80,6 +80,30 @@ publicRoutes.post("/pitches/:id/vote", async (c) => {
   return c.json({ ok: true });
 });
 
+// Act It Out: rank the three other teams, best first. One ballot per person per round, changeable until voting closes.
+publicRoutes.post("/act-rounds/:id/vote", async (c) => {
+  const user = requireUser(c.get("user"));
+  const roundId = Number(c.req.param("id"));
+  const { ranking } = await c.req.json<{ ranking?: number[] }>();
+  const r = await c.env.DB.prepare("SELECT id, phase, phase_ends_at FROM act_rounds WHERE id = ?").bind(roundId).first<{ id: number; phase: string; phase_ends_at: number | null }>();
+  if (!r) throw new HttpError(404, "No such round");
+  if (r.phase !== "voting") throw new HttpError(409, "Voting is not open for this round");
+  if (r.phase_ends_at && now() > r.phase_ends_at + 5000) throw new HttpError(409, "Voting time is up");
+  if (user.team_id == null) throw new HttpError(403, "You are not on a team yet");
+  const picks = (ranking ?? []).map(Number);
+  const { results: teams } = await c.env.DB.prepare("SELECT id FROM teams").all<{ id: number }>();
+  const others = teams.map((x) => x.id).filter((id) => id !== user.team_id);
+  const valid = picks.length === others.length && new Set(picks).size === picks.length && picks.every((p) => others.includes(p));
+  if (!valid) throw new HttpError(400, "Rank each of the other teams once. You can't rank your own team.");
+  await c.env.DB.prepare(
+    `INSERT INTO act_votes (round_id, voter_id, first_team, second_team, third_team, created_at) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (round_id, voter_id) DO UPDATE SET first_team = excluded.first_team, second_team = excluded.second_team, third_team = excluded.third_team`,
+  )
+    .bind(roundId, user.id, picks[0], picks[1], picks[2], now())
+    .run();
+  return c.json({ ok: true });
+});
+
 // Public big-screen data. Protected by a secret key in the URL, no login.
 publicRoutes.get("/screen", async (c) => {
   const s = await getSettings(c.env);

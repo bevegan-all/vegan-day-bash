@@ -9,11 +9,9 @@ import { QrImage } from "./Admin";
 type Tab = "rules" | "ledger" | "staff" | "audit";
 
 const POINT_FIELDS: [string, string][] = [
-  ["pts_semi_win", "Meme Charades semi-final win"],
-  ["pts_final_win", "Meme Charades final win"],
-  ["pts_final_runner_up", "Meme Charades final runner-up"],
-  ["pts_greenred_winner", "Green Light – Red Light winner's team"],
-  ["pts_greenred_cleared", "Each person who cleared (their team)"],
+  ["pts_semi_win", "Knockout games (Meme Charades, Shark Tank): semi-final win"],
+  ["pts_final_win", "Knockout games: final win, on top of the semi-final point"],
+  ["pts_final_runner_up", "Knockout games: final runner-up"],
   ["participation_points", "Solo games: points for just playing"],
   ["shark_min_votes", "Shark Tank: minimum votes to close a pitch"],
   ["shark_prep_seconds", "Shark Tank: preparation time (seconds)"],
@@ -22,6 +20,9 @@ const POINT_FIELDS: [string, string][] = [
   ["meme_act_seconds", "Meme Charades: acting time per turn (seconds)"],
   ["meme_turns_per_team", "Meme Charades: turns per team in a match"],
   ["meme_count", "Meme Charades: how many memes you have (numbered 1 to this)"],
+  ["actout_act_seconds", "Act It Out: time for each team (seconds)"],
+  ["actout_vote_seconds", "Act It Out: voting time (seconds)"],
+  ["actout_rounds", "Act It Out: number of rounds"],
 ];
 
 export function Settings() {
@@ -61,7 +62,7 @@ function Rules() {
 
   async function save() {
     const body: Record<string, string> = {};
-    for (const k of [...POINT_FIELDS.map((f) => f[0]), "rank_points", "shark_block_opponent", "individual_to_team"]) body[k] = form[k];
+    for (const k of [...POINT_FIELDS.map((f) => f[0]), "rank_points", "team_rank_points", "shark_block_opponent", "individual_to_team"]) body[k] = form[k];
     try {
       await api("/admin/settings", { method: "PUT", body });
       toast("Saved");
@@ -71,13 +72,22 @@ function Rules() {
     }
   }
 
-  const rankText = (() => {
+  const listText = (raw: string | undefined) => {
     try {
-      return JSON.parse(form.rank_points ?? "[]").join(", ");
+      return JSON.parse(raw ?? "[]").join(", ");
     } catch {
-      return form.rank_points ?? "";
+      return raw ?? "";
     }
-  })();
+  };
+  const toList = (text: string) =>
+    JSON.stringify(
+      text
+        .split(",")
+        .map((x) => Number(x.trim()))
+        .filter((n) => !Number.isNaN(n)),
+    );
+  const rankText = listText(form.rank_points);
+  const teamRankText = listText(form.team_rank_points);
 
   return (
     <>
@@ -95,6 +105,10 @@ function Rules() {
               />
             </label>
           ))}
+          <label className="block">
+            <span className="text-sm">Team games: points for 1st, 2nd, 3rd and 4th place (Act It Out rounds, Green Light – Red Light)</span>
+            <input className={inputCls + " mt-1.5"} value={teamRankText} onChange={(e) => set("team_rank_points", toList(e.target.value))} />
+          </label>
           <label className="block">
             <span className="text-sm">Solo rank points (1st, 2nd, 3rd and so on, comma separated)</span>
             <input

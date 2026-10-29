@@ -32,7 +32,7 @@ export async function notifyRemoved(env: Env, gameId: number, userId: number) {
 // One light call, polled for the whole app: new alerts, live games, and the Shark Tank turn in progress.
 notifyRoutes.get("/pulse", async (c) => {
   const user = need(c.get("user"));
-  const [notifs, live, mine, pitches, settings, memeRows] = await Promise.all([
+  const [notifs, live, mine, pitches, settings, memeRows, actRound] = await Promise.all([
     c.env.DB.prepare(
       `SELECT id, kind, title, body, game_id AS gameId, created_at AS at FROM notifications
         WHERE user_id = ? AND read_at IS NULL ORDER BY id DESC LIMIT 20`,
@@ -76,6 +76,14 @@ notifyRoutes.get("/pulse", async (c) => {
       team_a: number;
       team_b: number;
       game_id: number;
+    }>(),
+    c.env.DB.prepare("SELECT id, game_id, ord, scene, phase, phase_ends_at FROM act_rounds WHERE phase != 'done' ORDER BY game_id, ord LIMIT 1").first<{
+      id: number;
+      game_id: number;
+      ord: number;
+      scene: string | null;
+      phase: string;
+      phase_ends_at: number | null;
     }>(),
   ]);
   const inGames = new Set(mine.results.map((r) => r.game_id));
@@ -138,12 +146,45 @@ notifyRoutes.get("/pulse", async (c) => {
       last: lastDone ? { teamId: lastDone.team_id, result: lastDone.result, ord: lastDone.ord } : null,
     };
   }
+
+  // Act It Out: the round in progress, the order the teams perform in, and (while voting) this person's ballot
+  let actout = null;
+  if (actRound) {
+    const [turns, total, vote, lastRound] = await Promise.all([
+      c.env.DB.prepare("SELECT team_id, phase, phase_ends_at, ord FROM act_turns WHERE round_id = ? ORDER BY ord").bind(actRound.id).all<{ team_id: number; phase: string; phase_ends_at: number | null; ord: number }>(),
+      c.env.DB.prepare("SELECT COUNT(*) AS n FROM act_rounds WHERE game_id = ?").bind(actRound.game_id).first<{ n: number }>(),
+      actRound.phase === "voting"
+        ? c.env.DB.prepare("SELECT first_team AS a, second_team AS b, third_team AS c FROM act_votes WHERE round_id = ? AND voter_id = ?").bind(actRound.id, user.id).first<{ a: number; b: number; c: number }>()
+        : Promise.resolve(null),
+      c.env.DB.prepare("SELECT id, ord FROM act_rounds WHERE game_id = ? AND phase = 'done' ORDER BY ord DESC LIMIT 1").bind(actRound.game_id).first<{ id: number; ord: number }>(),
+    ]);
+    const lastResults = lastRound
+      ? (await c.env.DB.prepare("SELECT team_id AS teamId, rank, points FROM act_results WHERE round_id = ? ORDER BY rank, team_id").bind(lastRound.id).all<{ teamId: number; rank: number; points: number }>()).results
+      : [];
+    const cur = actRound.phase === "voting" ? null : turns.results.find((x) => x.phase !== "done");
+    actout = {
+      gameId: actRound.game_id,
+      roundId: actRound.id,
+      ord: actRound.ord,
+      total: total?.n ?? 0,
+      scene: actRound.scene,
+      phase: actRound.phase,
+      endsAt: actRound.phase_ends_at,
+      turns: turns.results.map((x) => ({ teamId: x.team_id, phase: x.phase, endsAt: x.phase_ends_at })),
+      current: cur ? { teamId: cur.team_id, phase: cur.phase, endsAt: cur.phase_ends_at } : null,
+      canVote: user.team_id != null,
+      eligible: turns.results.map((x) => x.team_id).filter((id) => id !== user.team_id),
+      myRanking: vote ? [vote.a, vote.b, vote.c] : null,
+      last: lastRound ? { ord: lastRound.ord, results: lastResults } : null,
+    };
+  }
   return c.json({
     serverNow: now(),
     notifications: notifs.results,
     live: live.results.map((g) => ({ ...g, youIn: inGames.has(g.id) })),
     shark,
     meme,
+    actout,
   });
 });
 

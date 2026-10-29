@@ -15,7 +15,8 @@ import {
   type User,
 } from "./lib";
 import { createUser, newLoginLink } from "./users";
-import { buildGameDetail, memeConfig, pitchTally, sharkTimers } from "./games";
+import { actConfig, buildGameDetail, memeConfig, pitchTally, sharkTimers } from "./games";
+import { parseTable, sharePoints, tieGroups } from "./scoring";
 import { notifyNewPlayers, notifyRemoved } from "./notify";
 
 export const adminRoutes = new Hono<AppEnv>();
@@ -204,7 +205,7 @@ adminRoutes.put("/settings", async (c) => {
   for (const [k, v] of Object.entries(body)) {
     if (!(k in current) || k === "screen_key") throw new HttpError(400, `Unknown setting ${k}`);
     const val = typeof v === "boolean" ? (v ? "1" : "0") : String(v);
-    if (k === "rank_points") {
+    if (k === "rank_points" || k === "team_rank_points") {
       const arr = JSON.parse(val);
       if (!Array.isArray(arr) || arr.some((n) => typeof n !== "number")) throw new HttpError(400, "rank_points must be a list of numbers");
     } else if (Number.isNaN(Number(val))) throw new HttpError(400, `${k} must be a number`);
@@ -406,22 +407,28 @@ adminRoutes.delete("/games/:id/players", async (c) => {
 // so adding, changing or removing a time keeps the points correct.
 async function recalcGreenRed(env: Env, gameId: number, by: number) {
   const s = await getSettings(env);
-  const winPts = Number(s.pts_greenred_winner);
-  const clearPts = Number(s.pts_greenred_cleared);
+  const table = parseTable(s.team_rank_points);
   const ref = `gr:${gameId}`;
   const { results } = await env.DB.prepare(
-    `SELECT r.user_id, u.team_id FROM results r JOIN users u ON u.id = r.user_id
-      WHERE r.game_id = ? AND r.voided_at IS NULL ORDER BY r.value ASC, r.created_at ASC`,
+    `SELECT r.value, u.team_id FROM results r JOIN users u ON u.id = r.user_id
+      WHERE r.game_id = ? AND r.voided_at IS NULL AND u.team_id IS NOT NULL`,
   )
     .bind(gameId)
-    .all<{ user_id: number; team_id: number | null }>();
-  const perTeam = new Map<number, number>();
-  results.forEach((r, i) => {
-    if (r.team_id == null) return;
-    perTeam.set(r.team_id, (perTeam.get(r.team_id) ?? 0) + (i === 0 ? winPts : clearPts));
-  });
+    .all<{ value: number; team_id: number }>();
   const stmts = [env.DB.prepare("UPDATE team_points SET voided_at = ? WHERE ref = ? AND voided_at IS NULL").bind(now(), ref)];
-  for (const [teamId, pts] of perTeam) stmts.push(addPoints(env, gameId, teamId, pts, "Green Light – Red Light", ref, by));
+  if (results.length) {
+    // team ranking: more finishers is better, and the fastest finisher breaks a tie
+    const { results: teams } = await env.DB.prepare("SELECT id FROM teams ORDER BY id").all<{ id: number }>();
+    const stats = teams.map((tm) => {
+      const mine = results.filter((r) => r.team_id === tm.id);
+      return { id: tm.id, count: mine.length, best: mine.length ? Math.min(...mine.map((r) => r.value)) : Infinity };
+    });
+    stats.sort((a, b) => b.count - a.count || a.best - b.best || a.id - b.id);
+    const groups = tieGroups(stats, (x) => `${x.count}:${x.best}`, (x) => x.id);
+    for (const [teamId, v] of sharePoints(groups, table)) {
+      if (v.points > 0) stmts.push(addPoints(env, gameId, teamId, v.points, "Green Light – Red Light", ref, by));
+    }
+  }
   await env.DB.batch(stmts);
 }
 
@@ -527,13 +534,12 @@ async function finishAndAdvance(c: Ctx, m: MatchRow, winner: number, loser: numb
   const ref = `match:${m.id}`;
   await voidRef(c.env, ref);
   const stmts = [c.env.DB.prepare("UPDATE matches SET status = 'done', winner_team = ? WHERE id = ?").bind(winner, m.id)];
-  if (m.type === "meme") {
-    if (m.stage === "final") {
-      stmts.push(addPoints(c.env, m.game_id, winner, Number(s.pts_final_win), "Meme Charades final win", ref, me(c).id));
-      if (loser) stmts.push(addPoints(c.env, m.game_id, loser, Number(s.pts_final_runner_up), "Meme Charades final runner-up", ref, me(c).id));
-    } else {
-      stmts.push(addPoints(c.env, m.game_id, winner, Number(s.pts_semi_win), "Meme Charades semi-final win", ref, me(c).id));
-    }
+  const gameName = m.type === "shark" ? "Shark Tank" : "Meme Charades";
+  if (m.stage === "final") {
+    if (Number(s.pts_final_win) > 0) stmts.push(addPoints(c.env, m.game_id, winner, Number(s.pts_final_win), `${gameName} final win`, ref, me(c).id));
+    if (loser && Number(s.pts_final_runner_up) > 0) stmts.push(addPoints(c.env, m.game_id, loser, Number(s.pts_final_runner_up), `${gameName} final runner-up`, ref, me(c).id));
+  } else if (Number(s.pts_semi_win) > 0) {
+    stmts.push(addPoints(c.env, m.game_id, winner, Number(s.pts_semi_win), `${gameName} semi-final win`, ref, me(c).id));
   }
   await c.env.DB.batch(stmts);
 
@@ -713,7 +719,6 @@ adminRoutes.post("/pitches/:id/close", async (c) => {
   await voidRef(c.env, ref);
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE pitches SET phase = 'done', phase_ends_at = NULL, state = 'closed', votes = ?, avg = ? WHERE id = ?").bind(tally.votes, tally.avg, p.id),
-    addPoints(c.env, p.game_id, p.team_id, round1(tally.avg), "Shark Tank pitch (audience score)", ref, me(c).id),
   ]);
   await audit(c.env, me(c).id, "pitch.close", { id: p.id, ...tally });
 
@@ -852,6 +857,170 @@ adminRoutes.post("/meme-turns/:id/reset", async (c) => {
     c.env.DB.prepare("DELETE FROM meme_turn_players WHERE turn_id = ?").bind(t.id),
   ]);
   await audit(c.env, me(c).id, "meme.reset_turn", { turnId: t.id });
+  return c.json({ ok: true });
+});
+
+// ---------- Act It Out: rounds, turns and the public ranking ----------
+// Each round, the four teams act one after another. Then everyone ranks the three other teams.
+
+async function getActRound(c: Ctx, id: number) {
+  const r = await c.env.DB.prepare("SELECT id, game_id, ord, phase, phase_ends_at FROM act_rounds WHERE id = ?").bind(id).first<{ id: number; game_id: number; ord: number; phase: string; phase_ends_at: number | null }>();
+  if (!r) throw new HttpError(404, "No such round");
+  return r;
+}
+
+async function getActTurn(c: Ctx, id: number) {
+  const row = await c.env.DB.prepare(
+    `SELECT t.id, t.round_id, t.ord, t.team_id, t.phase, r.phase AS round_phase, r.game_id, r.ord AS round_ord
+       FROM act_turns t JOIN act_rounds r ON r.id = t.round_id WHERE t.id = ?`,
+  )
+    .bind(id)
+    .first<{ id: number; round_id: number; ord: number; team_id: number; phase: string; round_phase: string; game_id: number; round_ord: number }>();
+  if (!row) throw new HttpError(404, "No such turn");
+  return row;
+}
+
+adminRoutes.post("/games/:id/actout/start", async (c) => {
+  const gameId = Number(c.req.param("id"));
+  const game = await c.env.DB.prepare("SELECT id, type FROM games WHERE id = ?").bind(gameId).first<{ id: number; type: string }>();
+  if (!game || game.type !== "actout") throw new HttpError(404, "This is not the Act It Out game");
+  const has = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM act_rounds WHERE game_id = ?").bind(gameId).first<{ n: number }>();
+  if ((has?.n ?? 0) > 0) throw new HttpError(409, "The rounds have already been created");
+  const cfg = await actConfig(c.env);
+  const { results: teams } = await c.env.DB.prepare("SELECT id FROM teams ORDER BY id").all<{ id: number }>();
+  const stmts = [];
+  for (let r = 1; r <= cfg.rounds; r++) stmts.push(c.env.DB.prepare("INSERT INTO act_rounds (game_id, ord) VALUES (?, ?)").bind(gameId, r));
+  // the order the teams perform in shifts by one each round, so the same team is not always first
+  for (let r = 1; r <= cfg.rounds; r++) {
+    for (let i = 0; i < teams.length; i++) {
+      stmts.push(
+        c.env.DB.prepare("INSERT INTO act_turns (round_id, ord, team_id) SELECT id, ?, ? FROM act_rounds WHERE game_id = ? AND ord = ?").bind(i + 1, teams[(i + r - 1) % teams.length].id, gameId, r),
+      );
+    }
+  }
+  await c.env.DB.batch(stmts);
+  await audit(c.env, me(c).id, "actout.start", { gameId, rounds: cfg.rounds });
+  return c.json({ ok: true });
+});
+
+adminRoutes.patch("/act-rounds/:id", async (c) => {
+  const r = await getActRound(c, Number(c.req.param("id")));
+  const { scene } = await c.req.json<{ scene?: string }>();
+  await c.env.DB.prepare("UPDATE act_rounds SET scene = ? WHERE id = ?").bind(String(scene ?? "").trim().slice(0, 40) || null, r.id).run();
+  return c.json({ ok: true });
+});
+
+adminRoutes.post("/act-turns/:id/start", async (c) => {
+  const t = await getActTurn(c, Number(c.req.param("id")));
+  if (t.phase !== "idle") throw new HttpError(409, "This team has already performed");
+  if (t.round_phase !== "idle" && t.round_phase !== "performing") throw new HttpError(409, "This round is already at the voting stage");
+  const earlierRound = await c.env.DB.prepare("SELECT 1 FROM act_rounds WHERE game_id = ? AND ord < ? AND phase != 'done'").bind(t.game_id, t.round_ord).first();
+  if (earlierRound) throw new HttpError(409, "Finish the previous round first");
+  const earlierTurn = await c.env.DB.prepare("SELECT 1 FROM act_turns WHERE round_id = ? AND ord < ? AND phase != 'done'").bind(t.round_id, t.ord).first();
+  if (earlierTurn) throw new HttpError(409, "Finish the previous team first");
+  const body = await c.req.json<{ scene?: string }>().catch(() => ({} as { scene?: string }));
+  const cfg = await actConfig(c.env);
+  const endsAt = now() + cfg.act * 1000;
+  const started = await c.env.DB.prepare("UPDATE act_turns SET phase = 'acting', phase_ends_at = ? WHERE id = ? AND phase = 'idle'").bind(endsAt, t.id).run();
+  if (!started.meta.changes) throw new HttpError(409, "This turn has already started");
+  const scene = String(body.scene ?? "").trim().slice(0, 40);
+  await c.env.DB.prepare("UPDATE act_rounds SET phase = 'performing', scene = COALESCE(?, scene) WHERE id = ? AND phase IN ('idle', 'performing')").bind(scene || null, t.round_id).run();
+  await audit(c.env, me(c).id, "actout.start_turn", { turnId: t.id });
+  return c.json({ ok: true, endsAt });
+});
+
+// The team has finished (early, or the minute ran out)
+adminRoutes.post("/act-turns/:id/done", async (c) => {
+  const t = await getActTurn(c, Number(c.req.param("id")));
+  const res = await c.env.DB.prepare("UPDATE act_turns SET phase = 'done', phase_ends_at = NULL WHERE id = ? AND phase = 'acting'").bind(t.id).run();
+  if (!res.meta.changes) throw new HttpError(409, "This team is not performing right now");
+  await audit(c.env, me(c).id, "actout.turn_done", { turnId: t.id });
+  return c.json({ ok: true });
+});
+
+adminRoutes.post("/act-turns/:id/reset", async (c) => {
+  const t = await getActTurn(c, Number(c.req.param("id")));
+  if (t.round_phase !== "idle" && t.round_phase !== "performing") throw new HttpError(409, "This round is already at the voting stage");
+  const later = await c.env.DB.prepare("SELECT 1 FROM act_turns WHERE round_id = ? AND ord > ? AND phase != 'idle'").bind(t.round_id, t.ord).first();
+  if (later) throw new HttpError(409, "Restart the later teams first");
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE act_turns SET phase = 'idle', phase_ends_at = NULL WHERE id = ?").bind(t.id),
+    c.env.DB.prepare("UPDATE act_rounds SET phase = 'idle' WHERE id = ? AND phase = 'performing' AND NOT EXISTS (SELECT 1 FROM act_turns WHERE round_id = ? AND phase != 'idle')").bind(t.round_id, t.round_id),
+  ]);
+  return c.json({ ok: true });
+});
+
+adminRoutes.post("/act-rounds/:id/open-voting", async (c) => {
+  const r = await getActRound(c, Number(c.req.param("id")));
+  if (r.phase !== "performing") throw new HttpError(409, r.phase === "voting" ? "Voting is already open" : "Let the teams perform first");
+  const open = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM act_turns WHERE round_id = ? AND phase != 'done'").bind(r.id).first<{ n: number }>();
+  if ((open?.n ?? 0) > 0) throw new HttpError(409, "Every team has to perform before voting opens");
+  const cfg = await actConfig(c.env);
+  const endsAt = now() + cfg.vote * 1000;
+  const res = await c.env.DB.prepare("UPDATE act_rounds SET phase = 'voting', phase_ends_at = ? WHERE id = ? AND phase = 'performing'").bind(endsAt, r.id).run();
+  if (!res.meta.changes) throw new HttpError(409, "Voting is already open");
+  await audit(c.env, me(c).id, "actout.open_voting", { roundId: r.id });
+  return c.json({ ok: true, endsAt });
+});
+
+// Rank the teams from the ballots. Each ballot gives 3, 2 and 1 points to the three teams it ranks.
+// A team is scored by its average over the ballots that ranked it (so uneven team sizes do not matter).
+async function scoreActRound(env: Env, roundId: number) {
+  const { results: votes } = await env.DB.prepare("SELECT first_team AS a, second_team AS b, third_team AS c FROM act_votes WHERE round_id = ?").bind(roundId).all<{ a: number; b: number; c: number }>();
+  const { results: teams } = await env.DB.prepare("SELECT id FROM teams ORDER BY id").all<{ id: number }>();
+  const stats = new Map(teams.map((tm) => [tm.id, { id: tm.id, sum: 0, n: 0, firsts: 0 }]));
+  for (const v of votes) {
+    for (const [team, pts] of [[v.a, 3], [v.b, 2], [v.c, 1]] as const) {
+      const s = stats.get(team);
+      if (s) {
+        s.sum += pts;
+        s.n += 1;
+        if (pts === 3) s.firsts += 1;
+      }
+    }
+  }
+  const rows = [...stats.values()].map((s) => ({ id: s.id, avg: s.n ? s.sum / s.n : 0, firsts: s.firsts, ballots: s.n }));
+  rows.sort((a, b) => b.avg - a.avg || b.firsts - a.firsts || a.id - b.id);
+  const s = await getSettings(env);
+  const shares = sharePoints(tieGroups(rows, (x) => `${x.avg.toFixed(6)}:${x.firsts}`, (x) => x.id), parseTable(s.team_rank_points));
+  return { ballots: votes.length, rows: rows.map((r) => ({ ...r, rank: shares.get(r.id)!.rank, points: shares.get(r.id)!.points })) };
+}
+
+adminRoutes.post("/act-rounds/:id/close", async (c) => {
+  const r = await getActRound(c, Number(c.req.param("id")));
+  if (r.phase !== "voting") throw new HttpError(409, "Open voting for this round first");
+  const body = await c.req.json<{ force?: boolean }>().catch(() => ({} as { force?: boolean }));
+  const scored = await scoreActRound(c.env, r.id);
+  if (scored.ballots === 0 && !body.force) throw new HttpError(409, "No votes yet. Save anyway?");
+  const res = await c.env.DB.prepare("UPDATE act_rounds SET phase = 'done', phase_ends_at = NULL WHERE id = ? AND phase = 'voting'").bind(r.id).run();
+  if (!res.meta.changes) throw new HttpError(409, "This round was already saved");
+  const ref = `act:${r.id}`;
+  await voidRef(c.env, ref);
+  const stmts = [c.env.DB.prepare("DELETE FROM act_results WHERE round_id = ?").bind(r.id)];
+  for (const row of scored.rows) {
+    stmts.push(
+      c.env.DB.prepare("INSERT INTO act_results (round_id, team_id, avg, firsts, ballots, rank, points) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(r.id, row.id, row.avg, row.firsts, row.ballots, row.rank, row.points),
+    );
+    if (row.points > 0) stmts.push(addPoints(c.env, r.game_id, row.id, row.points, `Act It Out round ${r.ord}`, ref, me(c).id));
+  }
+  await c.env.DB.batch(stmts);
+  await audit(c.env, me(c).id, "actout.close_round", { roundId: r.id, ballots: scored.ballots });
+  return c.json({ ok: true, ballots: scored.ballots, results: scored.rows });
+});
+
+// Start a round over (for a mistake): clears its turns, votes and points
+adminRoutes.post("/act-rounds/:id/reset", async (c) => {
+  const r = await getActRound(c, Number(c.req.param("id")));
+  const later = await c.env.DB.prepare("SELECT 1 FROM act_rounds WHERE game_id = ? AND ord > ? AND phase != 'idle'").bind(r.game_id, r.ord).first();
+  if (later) throw new HttpError(409, "Restart the later rounds first");
+  await voidRef(c.env, `act:${r.id}`);
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM act_votes WHERE round_id = ?").bind(r.id),
+    c.env.DB.prepare("DELETE FROM act_results WHERE round_id = ?").bind(r.id),
+    c.env.DB.prepare("UPDATE act_turns SET phase = 'idle', phase_ends_at = NULL WHERE round_id = ?").bind(r.id),
+    c.env.DB.prepare("UPDATE act_rounds SET phase = 'idle', phase_ends_at = NULL WHERE id = ?").bind(r.id),
+  ]);
+  await audit(c.env, me(c).id, "actout.reset_round", { roundId: r.id });
   return c.json({ ok: true });
 });
 

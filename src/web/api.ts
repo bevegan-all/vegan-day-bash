@@ -83,7 +83,7 @@ export interface GameSummary {
   slug: string;
   name: string;
   kind: "team" | "individual";
-  type: "meme" | "greenred" | "shark" | "activity" | "actout" | "individual" | "hookstep";
+  type: "meme" | "greenred" | "shark" | "activity" | "actout" | "individual" | "hookstep" | "tictactoe";
   resultType: string | null;
   description: string;
   status: "draft" | "upcoming" | "live" | "closed";
@@ -170,6 +170,50 @@ export interface HookStep {
   standings: HsStanding[];
 }
 
+export interface TttPlayer {
+  userId: number;
+  name: string;
+  teamId: number | null;
+}
+
+export interface TttMatch {
+  id: number;
+  slot: number;
+  a: TttPlayer | null;
+  b: TttPlayer | null;
+  winnerId: number | null;
+  status: "pending" | "live" | "done";
+  bye: boolean;
+  /** both players are known and nobody has won yet */
+  ready: boolean;
+}
+
+export interface TttRound {
+  round: number;
+  name: string;
+  matches: TttMatch[];
+}
+
+export interface Tictactoe {
+  state: "registration" | "running" | "done";
+  joinOpen: boolean;
+  roundsCount: number;
+  players: number;
+  mine: boolean;
+  roster: TttPlayer[];
+  rounds: TttRound[];
+  champion: TttPlayer | null;
+  you: {
+    inBracket: boolean;
+    matchId: number | null;
+    round: string | null;
+    status: "live" | "ready" | "waiting" | null;
+    opponent: TttPlayer | null;
+    outIn: string | null;
+    champion: boolean;
+  } | null;
+}
+
 export const hsLabel = (r: { kind: string; ord: number }) => (r.kind === "final" ? "Final" : `Round ${r.ord}`);
 
 export interface RosterPlayer {
@@ -246,7 +290,7 @@ export interface ActOutLive {
 export interface Pulse {
   serverNow: number;
   notifications: AppNotification[];
-  live: { id: number; slug: string; name: string; kind: string; type: string; location: string; youIn: boolean }[];
+  live: { id: number; slug: string; name: string; kind: string; type: string; location: string; youIn: boolean; joinOpen?: boolean }[];
   shark: SharkLive | null;
   meme: MemeLive | null;
   actout: ActOutLive | null;
@@ -372,6 +416,7 @@ export interface GameDetail extends GameSummary {
   board?: Board;
   recent?: { id: number; value: number; at: number; name: string; teamId: number | null; matchRef: string | null }[];
   hookstep?: HookStep | null;
+  tictactoe?: Tictactoe | null;
   greenred?: {
     mode: "single" | "multi" | null;
     heats: number;

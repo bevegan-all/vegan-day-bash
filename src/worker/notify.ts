@@ -51,7 +51,7 @@ notifyRoutes.get("/pulse", async (c) => {
     )
       .bind(user.id)
       .all(),
-    c.env.DB.prepare("SELECT id, slug, name, kind, type, location FROM games WHERE status = 'live' ORDER BY sort").all<{ id: number }>(),
+    c.env.DB.prepare("SELECT id, slug, name, kind, type, location, config FROM games WHERE status = 'live' ORDER BY sort").all<{ id: number; type: string; config: string }>(),
     c.env.DB.prepare(
       `SELECT game_id FROM game_players WHERE user_id = ?
        UNION SELECT r.game_id FROM gr_entries e JOIN gr_rounds r ON r.id = e.round_id WHERE e.user_id = ?`,
@@ -196,7 +196,7 @@ notifyRoutes.get("/pulse", async (c) => {
   return c.json({
     serverNow: now(),
     notifications: notifs.results,
-    live: live.results.map((g) => ({ ...g, youIn: inGames.has(g.id) })),
+    live: live.results.map(({ config, ...g }) => ({ ...g, youIn: inGames.has(g.id), joinOpen: g.type === "tictactoe" && !config.includes("running") })),
     shark,
     meme,
     actout,

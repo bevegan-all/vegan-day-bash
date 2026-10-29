@@ -13,7 +13,7 @@ import { ActOutLiveCard, ActOutSummary } from "../actout";
 import { AlertsToggle, usePulse } from "../pulse";
 import { InstallCard } from "../install";
 import { StepDots, passes } from "../hookstep";
-import { Avatar, Btn, Card, ErrorBox, Page, RankBadge, SectionLabel, Segmented, Spinner, StatusPill, TeamChip, TeamMark, ThemeSelect } from "../ui";
+import { Avatar, Btn, Card, toastError, ErrorBox, Page, RankBadge, SectionLabel, Segmented, Spinner, StatusPill, TeamChip, TeamMark, ThemeSelect } from "../ui";
 
 interface HomeData {
   teams: TeamRow[];
@@ -72,6 +72,7 @@ export function Home() {
                   <span className="mt-0.5 flex items-center gap-2 text-xs text-muted">
                     <LocationTag location={g.location} />
                     {g.youIn && <span className="font-semibold text-accent">You're in</span>}
+                    {!g.youIn && g.joinOpen && <span className="font-semibold text-accent">Join now</span>}
                   </span>
                 </span>
                 <StatusPill status="live" />
@@ -230,6 +231,7 @@ export function GameView() {
 
           {data.type === "greenred" && data.greenred && <GreenRedView game={data} />}
           {data.type === "hookstep" && data.hookstep && <HookStepView game={data} />}
+          {data.type === "tictactoe" && data.tictactoe && <TttView game={data} reload={reload} />}
 
           {data.board && data.type === "individual" && (
             <Card>
@@ -244,6 +246,132 @@ export function GameView() {
         </>
       )}
     </Page>
+  );
+}
+
+function TttView({ game, reload }: { game: GameDetail; reload: () => void }) {
+  const t = game.tictactoe!;
+  const { me } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const you = t.you;
+
+  async function join(leave: boolean) {
+    setBusy(true);
+    try {
+      await api(`/games/${game.id}/join`, { method: leave ? "DELETE" : "POST", body: {} });
+      reload();
+    } catch (e) {
+      toastError(e);
+    }
+    setBusy(false);
+  }
+
+  const shown = t.rounds.find((r) => r.matches.some((m) => !m.bye && !m.winnerId)) ?? t.rounds[t.rounds.length - 1];
+  const singular = (s: string | null | undefined) => (s ?? "").toLowerCase().replace(/s$/, "");
+
+  return (
+    <>
+      {t.state === "registration" && (
+        <Card className="space-y-3 text-center">
+          <div className="text-5xl font-semibold tabular-nums">{t.players}</div>
+          <div className="-mt-2 text-sm text-muted">{t.players === 1 ? "player has" : "players have"} joined</div>
+          {t.mine ? (
+            <>
+              <div className="flex items-center justify-center gap-2 font-semibold text-accent">
+                <Check size={18} strokeWidth={3} /> You're registered
+              </div>
+              <Btn variant="secondary" full busy={busy} onClick={() => join(true)}>
+                Leave the list
+              </Btn>
+            </>
+          ) : t.joinOpen ? (
+            <Btn full size="lg" busy={busy} onClick={() => join(false)}>
+              Join the tournament
+            </Btn>
+          ) : (
+            <p className="text-sm text-muted">Joining opens when the organisers make the game live.</p>
+          )}
+          <p className="text-xs text-subtle">When the organisers start, everyone is matched at random. Winners go through to the next round.</p>
+        </Card>
+      )}
+
+      {t.state !== "registration" && (
+        <Card className={you?.champion ? "border-warn bg-warn-soft" : you?.status === "ready" || you?.status === "live" ? "border-accent bg-accent-soft" : ""}>
+          {you?.champion ? (
+            <div className="flex items-center gap-3">
+              <Crown size={30} className="text-warn" />
+              <div>
+                <div className="font-semibold">You are the champion</div>
+                <div className="text-sm text-muted">Well played!</div>
+              </div>
+            </div>
+          ) : you?.status === "ready" || you?.status === "live" ? (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-accent">{you.round}</div>
+              <div className="mt-1 text-lg font-semibold">{you.status === "live" ? "Your match is on now" : "Your match is ready"}</div>
+              <div className="mt-2 flex items-center gap-2">
+                <TeamIcon teamId={you.opponent?.teamId} size={32} />
+                <span className="font-semibold">vs {you.opponent?.name}</span>
+              </div>
+              <div className="mt-1 text-sm text-muted">Head to the {game.location}.</div>
+            </div>
+          ) : you?.status === "waiting" ? (
+            <div>
+              <div className="font-semibold">You're through to the {singular(you.round)}</div>
+              <div className="text-sm text-muted">Waiting for your opponent to be decided.</div>
+            </div>
+          ) : you?.outIn ? (
+            <div>
+              <div className="font-semibold">You went out in the {singular(you.outIn)}</div>
+              <div className="text-sm text-muted">Thanks for playing. You can still follow the bracket below.</div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted">{t.mine ? "You're registered." : "The tournament is under way. Watch the bracket below."}</p>
+          )}
+        </Card>
+      )}
+
+      {t.champion && !you?.champion && (
+        <Card className="flex items-center gap-3">
+          <Crown size={24} className="text-warn" />
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-subtle">Champion</div>
+            <div className="font-semibold">{t.champion.name}</div>
+          </div>
+        </Card>
+      )}
+
+      {t.rounds.map((r) => {
+        const real = r.matches.filter((m) => !m.bye);
+        return (
+          <details key={r.round} open={r === shown} className="rounded-xl border border-line bg-surface p-4">
+            <summary className="flex cursor-pointer items-center justify-between font-semibold">
+              <span>
+                {r.name} <span className="font-normal text-muted">· {real.length} {real.length === 1 ? "match" : "matches"}</span>
+              </span>
+              <span className="text-xs text-subtle">
+                {real.filter((m) => m.winnerId).length}/{real.length} done
+              </span>
+            </summary>
+            <ul className="mt-3 divide-y divide-line">
+              {real.map((m) => (
+                <li key={m.id} className={`flex items-center gap-2 py-2 text-sm ${m.status === "live" ? "font-semibold" : ""}`}>
+                  {[m.a, m.b].map((p, i) => (
+                    <span key={i} className={`flex min-w-0 flex-1 items-center gap-1.5 ${m.winnerId && m.winnerId !== p?.userId ? "text-subtle line-through" : ""} ${p && p.userId === me?.id ? "text-accent" : ""} ${i ? "justify-end text-right" : ""}`}>
+                      {i === 0 && p && <TeamIcon teamId={p.teamId} size={20} />}
+                      <span className="truncate">{p ? p.name : "To be decided"}</span>
+                      {m.winnerId != null && m.winnerId === p?.userId && <Crown size={13} className="shrink-0 text-warn" />}
+                      {i === 1 && p && <TeamIcon teamId={p.teamId} size={20} />}
+                    </span>
+                  ))}
+                  {m.status === "live" && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-live" />}
+                </li>
+              ))}
+            </ul>
+          </details>
+        );
+      })}
+    </>
   );
 }
 

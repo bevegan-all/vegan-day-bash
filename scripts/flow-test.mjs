@@ -344,7 +344,7 @@ ok(d.matches[1].pitches.find((p) => p.teamId === 4).phase === "idle", "restarted
 }
 
 // ---- individual games
-const cup = g("cup-flip-tic-tac-toe");
+const cup = g("arm-wrestling");
 r = await admin.req(`/admin/games/${cup.id}/results`, { winnerId: users[0].id, loserId: users[1].id, idem: "m1" });
 ok(r.status === 200, "match recorded");
 r = await admin.req(`/admin/games/${cup.id}/results`, { winnerId: users[0].id, loserId: users[1].id, idem: "m1" });
@@ -823,6 +823,140 @@ ok(forged.status === 404, "forged QR rejected");
   }
   h = await hd();
   ok(h.phase === "done" && !h.hasFinal && h.winners.length === 1 && h.winners[0] === users[0].id, "one player ahead after 4 rounds wins with no final");
+}
+
+// ---- Paper Cup Flip Tic-Tac-Toe: join, auto-drawn knockout bracket, winners move on
+{
+  const tg = g("cup-flip-tic-tac-toe");
+  ok(tg.type === "tictactoe" && tg.kind === "individual", "Paper cup flip tic-tac-toe is a tournament game of its own type");
+  const mkO = async (name) => {
+    const made = await admin.req("/admin/users", { name, role: "organiser" });
+    const cl = new Client();
+    await cl.req("/auth/login", { username: made.j.username, password: made.j.password });
+    return cl;
+  };
+  const [oA, oB, oC] = [await mkO("Bracket Organiser A"), await mkO("Bracket Organiser B"), await mkO("Bracket Organiser C")];
+  const td = async () => (await admin.req(`/admin/games/${tg.id}`)).j.tictactoe;
+  const ovBefore = Object.fromEntries((await admin.req("/leaderboard/individual?full=1")).j.top.map((x) => [x.userId, x.value]));
+
+  r = await users[0].c.req(`/games/${tg.id}/join`, {});
+  ok(r.status === 409, "joining is only open while the game is live");
+  await admin.req(`/admin/games/${tg.id}`, { status: "live" }, "PATCH");
+  let t = await td();
+  ok(t.state === "registration" && t.joinOpen && t.players === 0, "registration is open once the game is live");
+  r = await admin.req(`/admin/games/${tg.id}/tictactoe/start`, {});
+  ok(r.status === 409, "a tournament needs at least 2 players");
+
+  // six players join themselves, five more are added by organisers
+  const self = users.slice(0, 6), added = users.slice(6, 11);
+  const joins = await Promise.all(self.map((u) => u.c.req(`/games/${tg.id}/join`, {})));
+  ok(joins.every((x) => x.status === 200), "players join from their own phone");
+  await users[0].c.req(`/games/${tg.id}/join`, {});
+  t = await td();
+  ok(t.players === 6, "joining twice counts once");
+  r = await users[5].c.req(`/games/${tg.id}/join`, undefined, "DELETE");
+  ok(r.status === 200 && (await td()).players === 5, "a player can leave before it starts");
+  await users[5].c.req(`/games/${tg.id}/join`, {});
+  r = await users[0].c.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: [users[6].id] });
+  ok(r.status === 403, "players can't add other people");
+  await Promise.all([oA.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: added.slice(0, 3).map((u) => u.id) }), oB.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: added.slice(2).map((u) => u.id) })]);
+  t = await td();
+  ok(t.players === 11, "organisers add the rest, together, with no duplicates (11 players)");
+
+  // start: 11 players need a 16 bracket, so 5 byes and 4 rounds
+  const started = await Promise.all([oA.req(`/admin/games/${tg.id}/tictactoe/start`, {}), oB.req(`/admin/games/${tg.id}/tictactoe/start`, {})]);
+  ok(started.filter((x) => x.status === 200).length === 1, "if two organisers press start together, the bracket is drawn once");
+  t = await td();
+  ok(t.state === "running" && t.roundsCount === 4 && t.rounds.length === 4, "the bracket has 4 rounds");
+  ok(t.rounds.map((x) => x.name).join(",") === "Round 1,Quarter-finals,Semi-finals,Final", "rounds are named round 1, quarter-finals, semi-finals, final");
+  ok(t.rounds.map((x) => x.matches.length).join(",") === "8,4,2,1", "8, 4, 2 and 1 matches");
+  const byes = t.rounds[0].matches.filter((m) => m.bye);
+  ok(byes.length === 5 && byes.every((m) => m.a && !m.b && m.winnerId === m.a.userId && m.status === "done"), "5 players get a bye and go straight through");
+  const placed = new Set(t.rounds[0].matches.flatMap((m) => [m.a?.userId, m.b?.userId].filter(Boolean)));
+  ok(placed.size === 11, "every player is in the first round exactly once");
+  r = await users[10].c.req(`/games/${tg.id}/join`, {});
+  ok(r.status === 409, "nobody can join after the start");
+  r = await admin.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: [users[11].id] });
+  ok(r.status === 409, "organisers can't add people after the start either");
+  let pz = (await users[0].c.req("/pulse")).j;
+  ok(pz.live.some((x) => x.slug === "cup-flip-tic-tac-toe" && x.youIn && x.joinOpen === false), "players see the game is theirs and joining is closed");
+
+  const find = (u, tt) => tt.rounds.flatMap((x) => x.matches).filter((m) => m.a?.userId === u.id || m.b?.userId === u.id);
+  const pairs = t.rounds[0].matches.filter((m) => !m.bye);
+  const idOf = (uid) => users.find((u) => u.id === uid);
+  // players get an alert when their match is ready
+  const first = pairs[0];
+  pz = (await idOf(first.a.userId).c.req("/pulse")).j;
+  ok(pz.notifications.some((n) => n.title.includes("Your match is ready")), "players are told when their match is ready");
+
+  // start one match, then pick winners of all round 1 matches with three organisers at once
+  r = await oA.req(`/admin/ttt-matches/${pairs[0].id}/start`, {});
+  ok(r.status === 200 && (await td()).rounds[0].matches.find((m) => m.id === pairs[0].id).status === "live", "an organiser starts a match: it shows as playing");
+  r = await oA.req(`/admin/ttt-matches/${t.rounds[2].matches[0].id}/start`, {});
+  ok(r.status === 409, "a match can't start before its players are known");
+  r = await oA.req(`/admin/ttt-matches/${pairs[0].id}/winner`, { userId: users[11].id });
+  ok(r.status === 400, "the winner has to be one of the two players");
+  const orgs = [oA, oB, oC];
+  const picks = await Promise.all(pairs.map((m, i) => orgs[i % 3].req(`/admin/ttt-matches/${m.id}/winner`, { userId: m.a.userId })));
+  ok(picks.every((x) => x.status === 200), "three organisers pick winners at the same time");
+  const race = await Promise.all([oA.req(`/admin/ttt-matches/${pairs[0].id}/winner`, { userId: pairs[0].b.userId }), oB.req(`/admin/ttt-matches/${pairs[0].id}/winner`, { userId: pairs[0].b.userId })]);
+  ok(race.filter((x) => x.status === 200).length >= 1, "changing a winner works while the next match hasn't started");
+  t = await td();
+  ok(t.rounds[0].matches.find((m) => m.id === pairs[0].id).winnerId === pairs[0].b.userId, "the corrected winner is saved");
+  const r2 = t.rounds[1].matches;
+  ok(r2.every((m) => m.a && m.b), "every quarter-final now has both players");
+  const slot0 = r2.find((m) => m.slot === Math.floor(pairs[0].slot / 2));
+  ok([slot0.a?.userId, slot0.b?.userId].includes(pairs[0].b.userId) && ![slot0.a?.userId, slot0.b?.userId].includes(pairs[0].a.userId), "the corrected winner, not the old one, is in the next round");
+
+  // play the rest: always the player on side a
+  let guard = 0;
+  while ((t = await td()).state === "running" && guard++ < 10) {
+    const ready = t.rounds.flatMap((x) => x.matches).filter((m) => m.ready && !m.winnerId);
+    if (!ready.length) break;
+    const out = await Promise.all(ready.map((m, i) => orgs[i % 3].req(`/admin/ttt-matches/${m.id}/winner`, { userId: m.a.userId })));
+    ok(out.every((x) => x.status === 200), "round of winners picked");
+    if (guard === 2) {
+      // a result can't be changed once the next match has been decided
+      const semi = t.rounds[1].matches[0];
+      r = await oA.req(`/admin/ttt-matches/${semi.id}/winner`, { userId: semi.b.userId });
+      ok(r.status === 409, "a result is locked once the next match is decided");
+    }
+  }
+  t = await td();
+  ok(t.state === "done" && t.champion && t.rounds[3].matches[0].winnerId === t.champion.userId, "the final decides the champion");
+  const champ = idOf(t.champion.userId);
+  ok((await champ.c.req(`/games/${tg.id}`)).j.tictactoe.you.champion === true, "the champion sees that they won");
+
+  // standings: champion, runner-up, then the two semi-final losers level on 3rd
+  const lb = (await admin.req(`/leaderboard/individual?game=${tg.id}`)).j.top;
+  ok(lb[0].userId === champ.id && lb[0].rank === 1 && lb[0].detail === "Champion", "the champion is 1st");
+  ok(lb[1].rank === 2 && lb[1].detail === "Runner-up", "the final's loser is 2nd");
+  ok(lb.filter((x) => x.rank === 3).length === 2, "the two semi-final losers share 3rd");
+  const ov = (await admin.req("/leaderboard/individual?full=1")).j.top;
+  const gain = (uid) => (ov.find((x) => x.userId === uid)?.value ?? 0) - (ovBefore[uid] ?? 0);
+  ok(gain(lb[0].userId) === 10 && gain(lb[1].userId) === 8 && gain(lb[2].userId) === 6 && gain(lb[3].userId) === 6, "points: champion 10, runner-up 8, both semi-final losers 6");
+
+  // start over: back to registration with the players kept
+  r = await oA.req(`/admin/games/${tg.id}/tictactoe/reset`, {});
+  ok(r.status === 403, "only an admin can start the tournament over");
+  r = await admin.req(`/admin/games/${tg.id}/tictactoe/reset`, {});
+  t = await td();
+  ok(r.status === 200 && t.state === "registration" && t.players === 11 && t.rounds.length === 0, "starting over reopens registration and keeps the players");
+  // a small one: 3 players, one bye
+  await admin.req(`/admin/games/${tg.id}/tictactoe/reset`, { clearPlayers: true });
+  await admin.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: users.slice(0, 3).map((u) => u.id) });
+  r = await admin.req(`/admin/games/${tg.id}/tictactoe/start`, {});
+  t = await td();
+  ok(r.status === 200 && t.roundsCount === 2 && t.rounds[0].matches.filter((m) => m.bye).length === 1 && t.rounds[1].matches[0].a && !t.rounds[1].matches[0].ready, "3 players: one bye, then a final waiting for the other match");
+  const real = t.rounds[0].matches.find((m) => !m.bye);
+  await oA.req(`/admin/ttt-matches/${real.id}/winner`, { userId: real.b.userId });
+  t = await td();
+  ok(t.rounds[1].matches[0].ready, "the final is ready once both players are known");
+  await admin.req(`/admin/ttt-matches/${t.rounds[1].matches[0].id}/winner`, { userId: t.rounds[1].matches[0].b.userId });
+  t = await td();
+  ok(t.state === "done" && t.rounds.length === 2, "a 3 player tournament finishes");
+  await admin.req(`/admin/games/${tg.id}/tictactoe/reset`, { clearPlayers: true });
+  await admin.req(`/admin/games/${tg.id}`, { status: "upcoming" }, "PATCH");
 }
 
 // ---- one-time sign-in code (moves a sign-in into the installed app)

@@ -6,6 +6,7 @@ import { adminRoutes } from "./admin";
 import { publicRoutes } from "./public";
 import { ensureTestAccounts } from "./seed";
 import { notifyRoutes } from "./notify";
+import { tttPublicRoutes } from "./tictactoe";
 
 const app = new Hono<AppEnv>();
 
@@ -49,6 +50,7 @@ app.route("/api", authRoutes);
 app.route("/api/admin", adminRoutes);
 app.route("/api", publicRoutes);
 app.route("/api", notifyRoutes);
+app.route("/api", tttPublicRoutes);
 
 app.all("/api/*", (c) => c.json({ error: "Not found" }, 404));
 

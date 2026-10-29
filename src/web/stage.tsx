@@ -44,6 +44,8 @@ export interface Step {
 
 export interface StageView {
   kicker: string;
+  /** replaces the standard label of the tone, for example "Join now" */
+  label?: string;
   title: ReactNode;
   sub?: ReactNode;
   tone: Tone;
@@ -95,7 +97,7 @@ export function Stage({ game, view }: { game: GameDetail; view: StageView }) {
       <div className={`mb-5 flex flex-wrap items-center justify-between gap-x-8 gap-y-4 rounded-xl border p-5 transition-colors duration-700 ${tone.panel}`}>
         <div className="min-w-0 flex-1">
           <div className="mb-2 flex flex-wrap items-center gap-3">
-            <span className={`rounded-full px-3 py-0.5 text-sm font-semibold uppercase tracking-wider ${tone.chip}`}>{tone.label}</span>
+            <span className={`rounded-full px-3 py-0.5 text-sm font-semibold uppercase tracking-wider ${tone.chip}`}>{view.label ?? tone.label}</span>
             <span className="text-sm font-semibold uppercase tracking-widest text-subtle">{view.kicker}</span>
           </div>
           <div key={String(view.tone) + String(typeof view.title === "string" ? view.title : "")} className="slide-in text-4xl font-semibold leading-tight tracking-tight md:text-5xl">

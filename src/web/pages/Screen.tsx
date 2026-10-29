@@ -132,6 +132,28 @@ function celebrationsOf(g: GameDetail): Celebration[] {
       rows: r.results.slice(0, 4).map((x) => ({ rank: x.rank, name: teamName(x.teamId), teamId: x.teamId, value: `+${x.points}` })),
     });
   }
+  const tt = g.tictactoe;
+  if (tt && tt.state !== "registration") {
+    const R = tt.roundsCount;
+    for (const r of tt.rounds) {
+      const real = r.matches.filter((m) => !m.bye);
+      if (!real.length || !real.every((m) => m.winnerId)) continue;
+      const winners = r.matches.map((m) => (m.winnerId === m.a?.userId ? m.a : m.b)).filter((p): p is NonNullable<typeof p> => !!p && r.matches.some((m) => m.winnerId === p.userId));
+      if (r.round === R) {
+        const champ = tt.champion;
+        if (champ) out.push({ id: `tc${g.id}:${champ.userId}`, teamId: champ.teamId, kicker: `${g.name} · Champion`, title: `${champ.name} wins the tournament!`, sub: "Paper cup flip champion" });
+      } else if (r.round >= R - 2 && winners.length <= 4) {
+        const next = tt.rounds[r.round];
+        out.push({
+          id: `tr${g.id}:${r.round}:${winners.map((w) => w.userId).join(",")}`,
+          kicker: `${g.name} · ${next.name}`,
+          title: winners.length === 2 ? "The final is set" : `${winners.length} players are through`,
+          sub: winners.length === 2 ? `${winners[0].name} vs ${winners[1].name}` : `Into the ${next.name.toLowerCase()}`,
+          rows: winners.map((w) => ({ rank: 1, name: w.name, teamId: w.teamId, value: "" })),
+        });
+      }
+    }
+  }
   const hs = g.hookstep;
   if (hs?.configured) {
     const lead = hs.standings.filter((s) => hs.leaders.includes(s.userId));
@@ -190,6 +212,8 @@ function LiveGame({ game }: { game: GameDetail }) {
       return <RaceStage game={game} />;
     case "hookstep":
       return <HookStage game={game} />;
+    case "tictactoe":
+      return <TttStage game={game} />;
     case "individual":
       return <BoardStage game={game} />;
     default:
@@ -404,6 +428,81 @@ function RaceStage({ game }: { game: GameDetail }) {
         </div>
       )}
       {timed.length === 0 && shown.status !== "live" && shown.entries.length === 0 && <div className="py-2 text-center text-2xl text-muted">The organisers are lining people up.</div>}
+    </div>
+  );
+  return <Stage game={game} view={view} />;
+}
+
+function TttStage({ game }: { game: GameDetail }) {
+  const tt = game.tictactoe;
+  if (!tt) return <Stage game={game} view={{ kicker: "Individual game", tone: "wait", title: "Tic-tac-toe tournament", sub: "Starting soon" }} />;
+  let view: StageView;
+  if (tt.state === "registration") {
+    view = {
+      kicker: "Registration",
+      label: tt.joinOpen ? "Join now" : "Up next",
+      tone: tt.joinOpen ? "vote" : "wait",
+      title: tt.joinOpen ? "Join the tournament on your phone" : "The tournament starts soon",
+      sub: tt.joinOpen ? "Open the app, go to Games, pick Paper Cup Flip Tic-Tac-Toe and tap Join" : `${tt.players} players registered`,
+    };
+    view.body = (
+      <div className="space-y-4">
+        <VoteMeter count={tt.players} label={tt.players === 1 ? "player joined" : "players joined"} />
+        <div className="flex flex-wrap gap-2">
+          {tt.roster.slice(-18).map((p) => (
+            <span key={p.userId} className="slide-in inline-flex items-center gap-2 rounded-full border border-line bg-sunken py-1 pl-1.5 pr-3 text-xl">
+              <TeamIcon teamId={p.teamId} size={26} /> {p.name}
+            </span>
+          ))}
+          {tt.roster.length > 18 && <span className="px-2 text-xl text-muted">+{tt.roster.length - 18} more</span>}
+        </div>
+      </div>
+    );
+    return <Stage game={game} view={view} />;
+  }
+
+  const real = (r: (typeof tt.rounds)[number]) => r.matches.filter((m) => !m.bye);
+  const current = tt.rounds.find((r) => real(r).some((m) => !m.winnerId)) ?? tt.rounds[tt.rounds.length - 1];
+  const matches = real(current);
+  const playing = matches.filter((m) => m.status === "live");
+  const done = matches.filter((m) => m.winnerId).length;
+  if (tt.champion) {
+    view = { kicker: "Result", tone: "done", title: `${tt.champion.name} is the champion`, sub: `${tt.roster.length} players, ${tt.roundsCount} rounds` };
+  } else {
+    view = { kicker: `${tt.roster.length} players`, tone: playing.length ? "live" : "wait", title: `${current.name} ${playing.length ? "is on" : "is under way"}`, sub: `${done} of ${matches.length} matches done${playing.length ? `  ·  ${playing.length} playing now` : ""}` };
+  }
+  view.steps = tt.rounds.map((r) => ({ label: r.name, state: real(r).every((m) => m.winnerId) ? "done" : r.round === current.round ? "live" : "next" }));
+  const shown = [...matches].sort((a, b) => Number(!!a.winnerId) - Number(!!b.winnerId) || Number(b.status === "live") - Number(a.status === "live") || a.slot - b.slot);
+  const limit = tt.champion ? 1 : 8;
+  const row = (m: (typeof matches)[number]) => (
+    <li key={m.id} className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-2xl ${m.status === "live" ? "border-accent/60 bg-accent-soft" : m.winnerId ? "border-line bg-sunken" : "border-line"}`}>
+      {[m.a, m.b].map((p, i) => (
+        <span key={i} className={`flex min-w-0 flex-1 items-center gap-2 ${i ? "justify-end text-right" : ""} ${m.winnerId && m.winnerId !== p?.userId ? "text-subtle line-through" : "font-semibold"}`}>
+          {i === 0 && p && <TeamIcon teamId={p.teamId} size={30} />}
+          <span className="truncate">{p ? p.name : "To be decided"}</span>
+          {m.winnerId != null && m.winnerId === p?.userId && <Crown size={22} className="shrink-0 text-warn" />}
+          {i === 1 && p && <TeamIcon teamId={p.teamId} size={30} />}
+        </span>
+      ))}
+      {m.status === "live" && <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-live" />}
+    </li>
+  );
+  view.body = (
+    <div className="space-y-3">
+      {!tt.champion && (
+        <ul className="space-y-2">{shown.slice(0, limit).map(row)}</ul>
+      )}
+      {!tt.champion && shown.length > limit && <div className="text-center text-xl text-muted">+{shown.length - limit} more matches in this round</div>}
+      {tt.champion && (
+        <ul className="space-y-2">
+          {tt.rounds
+            .slice(-2)
+            .reverse()
+            .flatMap((r) => real(r))
+            .slice(0, 3)
+            .map(row)}
+        </ul>
+      )}
     </div>
   );
   return <Stage game={game} view={view} />;

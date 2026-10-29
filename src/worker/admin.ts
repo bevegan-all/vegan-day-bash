@@ -19,6 +19,7 @@ import { actConfig, buildGameDetail, memeConfig, pitchTally, sharkTimers } from 
 import { parseTable, sharePoints, tieGroups } from "./scoring";
 import { notifyRemoved, notifyRoundEntries } from "./notify";
 import { hookAdminRoutes } from "./hookstep";
+import { tttAdminRoutes } from "./tictactoe";
 
 export const adminRoutes = new Hono<AppEnv>();
 
@@ -30,6 +31,7 @@ adminRoutes.use("*", async (c, next) => {
 });
 
 adminRoutes.route("/", hookAdminRoutes);
+adminRoutes.route("/", tttAdminRoutes);
 
 const me = (c: Ctx) => c.get("user") as User;
 const requireAdmin = (c: Ctx) => {

@@ -2,6 +2,7 @@ import { HttpError, getSettings, shortName, type Env, type User } from "./lib";
 import { computeIndividual, publicBoard } from "./leaderboard";
 import { parseTable } from "./scoring";
 import { hookDetail } from "./hookstep";
+import { tttDetail } from "./tictactoe";
 
 export async function sharkTimers(env: Env) {
   const s = await getSettings(env);
@@ -188,6 +189,11 @@ export async function buildGameDetail(env: Env, gameId: number, viewer: User | n
         myRanking: myOf.get(r.id) ?? null,
       })),
     };
+  }
+
+  if (game.type === "tictactoe") {
+    const [boards, tictactoe] = await Promise.all([computeIndividual(env), tttDetail(env, gameId, viewer, organiser)]);
+    return { ...base, board: publicBoard(boards.perGame.get(gameId) ?? [], viewer?.id ?? null, 10), tictactoe };
   }
 
   if (game.type === "hookstep") {

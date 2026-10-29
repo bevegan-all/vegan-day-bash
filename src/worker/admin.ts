@@ -19,7 +19,7 @@ import { actConfig, buildGameDetail, memeConfig, pitchTally, sharkTimers } from 
 import { parseTable, sharePoints, tieGroups } from "./scoring";
 import { notifyRemoved, notifyRoundEntries } from "./notify";
 import { hookAdminRoutes } from "./hookstep";
-import { tttAdminRoutes } from "./tictactoe";
+import { tttAdminRoutes } from "./knockout";
 
 export const adminRoutes = new Hono<AppEnv>();
 

@@ -1,7 +1,7 @@
 import { getSettings, shortName, type Env } from "./lib";
 import { parseTable } from "./scoring";
 import { rankHookstep } from "./hookstep";
-import { rankTictactoe } from "./tictactoe";
+import { rankKnockout } from "./knockout";
 
 export interface Ranked {
   userId: number;
@@ -108,7 +108,7 @@ export async function computeIndividual(env: Env): Promise<IndividualBoards> {
        FROM results r
        JOIN games g ON g.id = r.game_id
        JOIN users u ON u.id = r.user_id
-      WHERE r.voided_at IS NULL AND g.status != 'draft' AND g.type NOT IN ('hookstep', 'tictactoe')`,
+      WHERE r.voided_at IS NULL AND g.status != 'draft' AND g.type NOT IN ('hookstep', 'knockout')`,
   ).all<Row>();
 
   const byGame = new Map<number, Row[]>();
@@ -142,10 +142,10 @@ export async function computeIndividual(env: Env): Promise<IndividualBoards> {
     perGame.set(h.id, ranked);
     award(ranked, rankPoints, participation);
   }
-  // Paper cup flip tic-tac-toe: ranked by how far each player got, once the tournament is over
-  const { results: tttGames } = await env.DB.prepare("SELECT id FROM games WHERE type = 'tictactoe' AND status != 'draft'").all<{ id: number }>();
+  // Knockout tournaments: ranked by how far each player got, once the tournament is over
+  const { results: tttGames } = await env.DB.prepare("SELECT id FROM games WHERE type = 'knockout' AND status != 'draft'").all<{ id: number }>();
   for (const tg of tttGames) {
-    const ranked = await rankTictactoe(env, tg.id);
+    const ranked = await rankKnockout(env, tg.id);
     perGame.set(tg.id, ranked);
     award(ranked, rankPoints, participation);
   }

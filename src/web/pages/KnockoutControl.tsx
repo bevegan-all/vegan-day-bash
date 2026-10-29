@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Crown, Play, ScanLine, X } from "lucide-react";
-import { api, type GameDetail, type Tictactoe, type TttMatch, type TttPlayer, type TttRound } from "../api";
+import { api, type GameDetail, type Knockout, type TttMatch, type TttPlayer, type TttRound } from "../api";
 import { TeamIcon } from "../art";
 import { useAuth } from "../auth";
 import { PersonPickerModal, type Person } from "../pickers";
@@ -16,8 +16,8 @@ async function call<T = unknown>(path: string, body: unknown = {}, method = "POS
 }
 
 // Organiser screen for the knockout tournament: collect players, start it, then pick the winner of each match.
-export function TicTacToeControl({ game, reload }: { game: GameDetail; reload: () => void }) {
-  const t = game.tictactoe;
+export function KnockoutControl({ game, reload }: { game: GameDetail; reload: () => void }) {
+  const t = game.knockout;
   const { me } = useAuth();
   if (!t) return null;
   return (
@@ -29,7 +29,7 @@ export function TicTacToeControl({ game, reload }: { game: GameDetail; reload: (
           full
           onClick={async () => {
             if (!confirm("Start the tournament over? The bracket and its results are removed. The players who joined stay on the list.")) return;
-            if (await call(`/admin/games/${game.id}/tictactoe/reset`)) {
+            if (await call(`/admin/games/${game.id}/knockout/reset`)) {
               toast("Back to registration");
               reload();
             }
@@ -48,7 +48,7 @@ function plan(n: number) {
   return { rounds: Math.log2(size), byes: size - n, size };
 }
 
-function Registration({ game, t, reload }: { game: GameDetail; t: Tictactoe; reload: () => void }) {
+function Registration({ game, t, reload }: { game: GameDetail; t: Knockout; reload: () => void }) {
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const p = plan(t.players);
@@ -69,17 +69,17 @@ function Registration({ game, t, reload }: { game: GameDetail; t: Tictactoe; rel
             : "Set the game to Live (above) so players can join from their phone."}
         </p>
         <div className="grid grid-cols-2 gap-2">
-          <Btn variant="secondary" size="sm" onClick={async () => confirm("Add everyone who has checked in?") && (await call(`/admin/games/${game.id}/tictactoe/players`, { scope: "checked_in" })) && reload()}>
+          <Btn variant="secondary" size="sm" onClick={async () => confirm("Add everyone who has checked in?") && (await call(`/admin/games/${game.id}/knockout/players`, { scope: "checked_in" })) && reload()}>
             Add checked-in
           </Btn>
-          <Btn variant="secondary" size="sm" onClick={async () => confirm("Add every person to the tournament?") && (await call(`/admin/games/${game.id}/tictactoe/players`, { scope: "all" })) && reload()}>
+          <Btn variant="secondary" size="sm" onClick={async () => confirm("Add every person to the tournament?") && (await call(`/admin/games/${game.id}/knockout/players`, { scope: "all" })) && reload()}>
             Add everyone
           </Btn>
         </div>
         <Btn full onClick={() => setAdding(true)}>
           <ScanLine size={18} /> Add people (scan or search)
         </Btn>
-        {adding && <PersonPickerModal title="Add players" multi onPick={async (p: Person) => (await call(`/admin/games/${game.id}/tictactoe/players`, { userIds: [p.id] })) && reload()} onClose={() => setAdding(false)} />}
+        {adding && <PersonPickerModal title="Add players" multi onPick={async (p: Person) => (await call(`/admin/games/${game.id}/knockout/players`, { userIds: [p.id] })) && reload()} onClose={() => setAdding(false)} />}
       </Card>
 
       <Card className="space-y-3">
@@ -97,7 +97,7 @@ function Registration({ game, t, reload }: { game: GameDetail; t: Tictactoe; rel
           onClick={async () => {
             if (!confirm(`Start with ${t.players} players? Registration closes and the bracket is drawn.`)) return;
             setBusy(true);
-            if (await call(`/admin/games/${game.id}/tictactoe/start`)) {
+            if (await call(`/admin/games/${game.id}/knockout/start`)) {
               toast("The bracket is drawn");
               reload();
             }
@@ -118,7 +118,7 @@ function Registration({ game, t, reload }: { game: GameDetail; t: Tictactoe; rel
                   <TeamIcon teamId={p.teamId} size={28} />
                   <span className="min-w-0 flex-1 truncate font-medium">{p.name}</span>
                   <TeamChip teamId={p.teamId} small />
-                  <IconBtn label={`Remove ${p.name}`} className="!h-8 !w-8 text-danger" onClick={async () => confirm(`Take ${p.name} off the list? They get an alert.`) && (await call(`/admin/games/${game.id}/tictactoe/players/${p.userId}`, undefined, "DELETE")) && reload()}>
+                  <IconBtn label={`Remove ${p.name}`} className="!h-8 !w-8 text-danger" onClick={async () => confirm(`Take ${p.name} off the list? They get an alert.`) && (await call(`/admin/games/${game.id}/knockout/players/${p.userId}`, undefined, "DELETE")) && reload()}>
                     <X size={18} />
                   </IconBtn>
                 </li>
@@ -131,7 +131,7 @@ function Registration({ game, t, reload }: { game: GameDetail; t: Tictactoe; rel
   );
 }
 
-function Bracket({ t, reload }: { t: Tictactoe; reload: () => void }) {
+function Bracket({ t, reload }: { t: Knockout; reload: () => void }) {
   const [pick, setPick] = useState<number | null>(null);
   const open = (r: TttRound) => r.matches.some((m) => !m.bye && !m.winnerId);
   const selected = t.rounds.find((r) => r.round === pick) ?? t.rounds.find(open) ?? t.rounds[t.rounds.length - 1];

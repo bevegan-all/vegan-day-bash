@@ -132,7 +132,7 @@ function celebrationsOf(g: GameDetail): Celebration[] {
       rows: r.results.slice(0, 4).map((x) => ({ rank: x.rank, name: teamName(x.teamId), teamId: x.teamId, value: `+${x.points}` })),
     });
   }
-  const tt = g.tictactoe;
+  const tt = g.knockout;
   if (tt && tt.state !== "registration") {
     const R = tt.roundsCount;
     for (const r of tt.rounds) {
@@ -141,7 +141,7 @@ function celebrationsOf(g: GameDetail): Celebration[] {
       const winners = r.matches.map((m) => (m.winnerId === m.a?.userId ? m.a : m.b)).filter((p): p is NonNullable<typeof p> => !!p && r.matches.some((m) => m.winnerId === p.userId));
       if (r.round === R) {
         const champ = tt.champion;
-        if (champ) out.push({ id: `tc${g.id}:${champ.userId}`, teamId: champ.teamId, kicker: `${g.name} · Champion`, title: `${champ.name} wins the tournament!`, sub: "Paper cup flip champion" });
+        if (champ) out.push({ id: `tc${g.id}:${champ.userId}`, teamId: champ.teamId, kicker: `${g.name} · Champion`, title: `${champ.name} wins the tournament!`, sub: `${g.name} champion` });
       } else if (r.round >= R - 2 && winners.length <= 4) {
         const next = tt.rounds[r.round];
         out.push({
@@ -212,7 +212,7 @@ function LiveGame({ game }: { game: GameDetail }) {
       return <RaceStage game={game} />;
     case "hookstep":
       return <HookStage game={game} />;
-    case "tictactoe":
+    case "knockout":
       return <TttStage game={game} />;
     case "individual":
       return <BoardStage game={game} />;
@@ -434,8 +434,8 @@ function RaceStage({ game }: { game: GameDetail }) {
 }
 
 function TttStage({ game }: { game: GameDetail }) {
-  const tt = game.tictactoe;
-  if (!tt) return <Stage game={game} view={{ kicker: "Individual game", tone: "wait", title: "Tic-tac-toe tournament", sub: "Starting soon" }} />;
+  const tt = game.knockout;
+  if (!tt) return <Stage game={game} view={{ kicker: "Individual game", tone: "wait", title: "Tournament", sub: "Starting soon" }} />;
   let view: StageView;
   if (tt.state === "registration") {
     view = {
@@ -443,7 +443,7 @@ function TttStage({ game }: { game: GameDetail }) {
       label: tt.joinOpen ? "Join now" : "Up next",
       tone: tt.joinOpen ? "vote" : "wait",
       title: tt.joinOpen ? "Join the tournament on your phone" : "The tournament starts soon",
-      sub: tt.joinOpen ? "Open the app, go to Games, pick Paper Cup Flip Tic-Tac-Toe and tap Join" : `${tt.players} players registered`,
+      sub: tt.joinOpen ? `Open the app, go to Games, pick ${game.name} and tap Join` : `${tt.players} players registered`,
     };
     view.body = (
       <div className="space-y-4">
@@ -467,9 +467,9 @@ function TttStage({ game }: { game: GameDetail }) {
   const playing = matches.filter((m) => m.status === "live");
   const done = matches.filter((m) => m.winnerId).length;
   if (tt.champion) {
-    view = { kicker: "Result", tone: "done", title: `${tt.champion.name} is the champion`, sub: `${tt.roster.length} players, ${tt.roundsCount} rounds` };
+    view = { kicker: "Champion", tone: "done", title: `${tt.champion.name} is the champion`, sub: `${tt.roster.length} players, ${tt.roundsCount} rounds` };
   } else {
-    view = { kicker: `${tt.roster.length} players`, tone: playing.length ? "live" : "wait", title: `${current.name} ${playing.length ? "is on" : "is under way"}`, sub: `${done} of ${matches.length} matches done${playing.length ? `  ·  ${playing.length} playing now` : ""}` };
+    view = { kicker: `${tt.roster.length} players`, tone: playing.length ? "live" : "wait", title: `${current.name} ${current.name.endsWith("s") ? "are" : "is"} ${playing.length ? "on" : "under way"}`, sub: `${done} of ${matches.length} matches done${playing.length ? `  ·  ${playing.length} playing now` : ""}` };
   }
   view.steps = tt.rounds.map((r) => ({ label: r.name, state: real(r).every((m) => m.winnerId) ? "done" : r.round === current.round ? "live" : "next" }));
   const shown = [...matches].sort((a, b) => Number(!!a.winnerId) - Number(!!b.winnerId) || Number(b.status === "live") - Number(a.status === "live") || a.slot - b.slot);

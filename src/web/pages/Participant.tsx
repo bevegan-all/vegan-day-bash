@@ -231,7 +231,7 @@ export function GameView() {
 
           {data.type === "greenred" && data.greenred && <GreenRedView game={data} />}
           {data.type === "hookstep" && data.hookstep && <HookStepView game={data} />}
-          {data.type === "tictactoe" && data.tictactoe && <TttView game={data} reload={reload} />}
+          {data.type === "knockout" && data.knockout && <TttView game={data} reload={reload} />}
 
           {data.board && data.type === "individual" && (
             <Card>
@@ -250,7 +250,7 @@ export function GameView() {
 }
 
 function TttView({ game, reload }: { game: GameDetail; reload: () => void }) {
-  const t = game.tictactoe!;
+  const t = game.knockout!;
   const { me } = useAuth();
   const [busy, setBusy] = useState(false);
   const you = t.you;

@@ -6,7 +6,7 @@ import { adminRoutes } from "./admin";
 import { publicRoutes } from "./public";
 import { ensureTestAccounts } from "./seed";
 import { notifyRoutes } from "./notify";
-import { tttPublicRoutes } from "./tictactoe";
+import { tttPublicRoutes } from "./knockout";
 
 const app = new Hono<AppEnv>();
 

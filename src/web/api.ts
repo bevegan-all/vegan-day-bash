@@ -83,7 +83,7 @@ export interface GameSummary {
   slug: string;
   name: string;
   kind: "team" | "individual";
-  type: "meme" | "greenred" | "shark" | "activity" | "actout" | "individual" | "hookstep" | "tictactoe";
+  type: "meme" | "greenred" | "shark" | "activity" | "actout" | "individual" | "hookstep" | "knockout";
   resultType: string | null;
   description: string;
   status: "draft" | "upcoming" | "live" | "closed";
@@ -194,7 +194,7 @@ export interface TttRound {
   matches: TttMatch[];
 }
 
-export interface Tictactoe {
+export interface Knockout {
   state: "registration" | "running" | "done";
   joinOpen: boolean;
   roundsCount: number;
@@ -416,7 +416,7 @@ export interface GameDetail extends GameSummary {
   board?: Board;
   recent?: { id: number; value: number; at: number; name: string; teamId: number | null; matchRef: string | null }[];
   hookstep?: HookStep | null;
-  tictactoe?: Tictactoe | null;
+  knockout?: Knockout | null;
   greenred?: {
     mode: "single" | "multi" | null;
     heats: number;

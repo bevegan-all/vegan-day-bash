@@ -196,7 +196,7 @@ notifyRoutes.get("/pulse", async (c) => {
   return c.json({
     serverNow: now(),
     notifications: notifs.results,
-    live: live.results.map(({ config, ...g }) => ({ ...g, youIn: inGames.has(g.id), joinOpen: g.type === "tictactoe" && !config.includes("running") })),
+    live: live.results.map(({ config, ...g }) => ({ ...g, youIn: inGames.has(g.id), joinOpen: g.type === "knockout" && !config.includes("running") })),
     shark,
     meme,
     actout,

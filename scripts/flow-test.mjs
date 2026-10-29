@@ -351,8 +351,8 @@ r = await admin.req(`/admin/games/${cup.id}/results`, { winnerId: users[0].id, l
 ok(r.j.duplicate === true, "duplicate match (same idem) ignored");
 await admin.req(`/admin/games/${cup.id}/results`, { winnerId: users[0].id, loserId: users[2].id });
 await admin.req(`/admin/games/${cup.id}/results`, { winnerId: users[2].id, loserId: users[1].id });
-const colour = g("colour-blind");
-for (let i = 0; i < 12; i++) await admin.req(`/admin/games/${colour.id}/results`, { userId: users[i].id, value: i % 5 });
+const scoreGame = (await admin.req("/admin/games", { name: "Test score game", resultType: "score_high" })).j;
+for (let i = 0; i < 12; i++) await admin.req(`/admin/games/${scoreGame.id}/results`, { userId: users[i].id, value: i % 5 });
 const sq = g("stay-in-the-square");
 await admin.req(`/admin/games/${sq.id}/results`, { userId: users[3].id, value: 41.5 });
 const pd = g("paper-dance");
@@ -828,7 +828,7 @@ ok(forged.status === 404, "forged QR rejected");
 // ---- Paper Cup Flip Tic-Tac-Toe: join, auto-drawn knockout bracket, winners move on
 {
   const tg = g("cup-flip-tic-tac-toe");
-  ok(tg.type === "tictactoe" && tg.kind === "individual", "Paper cup flip tic-tac-toe is a tournament game of its own type");
+  ok(tg.type === "knockout" && tg.kind === "individual", "Paper cup flip tic-tac-toe is a tournament game of its own type");
   const mkO = async (name) => {
     const made = await admin.req("/admin/users", { name, role: "organiser" });
     const cl = new Client();
@@ -836,7 +836,7 @@ ok(forged.status === 404, "forged QR rejected");
     return cl;
   };
   const [oA, oB, oC] = [await mkO("Bracket Organiser A"), await mkO("Bracket Organiser B"), await mkO("Bracket Organiser C")];
-  const td = async () => (await admin.req(`/admin/games/${tg.id}`)).j.tictactoe;
+  const td = async () => (await admin.req(`/admin/games/${tg.id}`)).j.knockout;
   const ovBefore = Object.fromEntries((await admin.req("/leaderboard/individual?full=1")).j.top.map((x) => [x.userId, x.value]));
 
   r = await users[0].c.req(`/games/${tg.id}/join`, {});
@@ -844,7 +844,7 @@ ok(forged.status === 404, "forged QR rejected");
   await admin.req(`/admin/games/${tg.id}`, { status: "live" }, "PATCH");
   let t = await td();
   ok(t.state === "registration" && t.joinOpen && t.players === 0, "registration is open once the game is live");
-  r = await admin.req(`/admin/games/${tg.id}/tictactoe/start`, {});
+  r = await admin.req(`/admin/games/${tg.id}/knockout/start`, {});
   ok(r.status === 409, "a tournament needs at least 2 players");
 
   // six players join themselves, five more are added by organisers
@@ -857,14 +857,14 @@ ok(forged.status === 404, "forged QR rejected");
   r = await users[5].c.req(`/games/${tg.id}/join`, undefined, "DELETE");
   ok(r.status === 200 && (await td()).players === 5, "a player can leave before it starts");
   await users[5].c.req(`/games/${tg.id}/join`, {});
-  r = await users[0].c.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: [users[6].id] });
+  r = await users[0].c.req(`/admin/games/${tg.id}/knockout/players`, { userIds: [users[6].id] });
   ok(r.status === 403, "players can't add other people");
-  await Promise.all([oA.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: added.slice(0, 3).map((u) => u.id) }), oB.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: added.slice(2).map((u) => u.id) })]);
+  await Promise.all([oA.req(`/admin/games/${tg.id}/knockout/players`, { userIds: added.slice(0, 3).map((u) => u.id) }), oB.req(`/admin/games/${tg.id}/knockout/players`, { userIds: added.slice(2).map((u) => u.id) })]);
   t = await td();
   ok(t.players === 11, "organisers add the rest, together, with no duplicates (11 players)");
 
   // start: 11 players need a 16 bracket, so 5 byes and 4 rounds
-  const started = await Promise.all([oA.req(`/admin/games/${tg.id}/tictactoe/start`, {}), oB.req(`/admin/games/${tg.id}/tictactoe/start`, {})]);
+  const started = await Promise.all([oA.req(`/admin/games/${tg.id}/knockout/start`, {}), oB.req(`/admin/games/${tg.id}/knockout/start`, {})]);
   ok(started.filter((x) => x.status === 200).length === 1, "if two organisers press start together, the bracket is drawn once");
   t = await td();
   ok(t.state === "running" && t.roundsCount === 4 && t.rounds.length === 4, "the bracket has 4 rounds");
@@ -876,7 +876,7 @@ ok(forged.status === 404, "forged QR rejected");
   ok(placed.size === 11, "every player is in the first round exactly once");
   r = await users[10].c.req(`/games/${tg.id}/join`, {});
   ok(r.status === 409, "nobody can join after the start");
-  r = await admin.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: [users[11].id] });
+  r = await admin.req(`/admin/games/${tg.id}/knockout/players`, { userIds: [users[11].id] });
   ok(r.status === 409, "organisers can't add people after the start either");
   let pz = (await users[0].c.req("/pulse")).j;
   ok(pz.live.some((x) => x.slug === "cup-flip-tic-tac-toe" && x.youIn && x.joinOpen === false), "players see the game is theirs and joining is closed");
@@ -925,7 +925,7 @@ ok(forged.status === 404, "forged QR rejected");
   t = await td();
   ok(t.state === "done" && t.champion && t.rounds[3].matches[0].winnerId === t.champion.userId, "the final decides the champion");
   const champ = idOf(t.champion.userId);
-  ok((await champ.c.req(`/games/${tg.id}`)).j.tictactoe.you.champion === true, "the champion sees that they won");
+  ok((await champ.c.req(`/games/${tg.id}`)).j.knockout.you.champion === true, "the champion sees that they won");
 
   // standings: champion, runner-up, then the two semi-final losers level on 3rd
   const lb = (await admin.req(`/leaderboard/individual?game=${tg.id}`)).j.top;
@@ -937,15 +937,15 @@ ok(forged.status === 404, "forged QR rejected");
   ok(gain(lb[0].userId) === 10 && gain(lb[1].userId) === 8 && gain(lb[2].userId) === 6 && gain(lb[3].userId) === 6, "points: champion 10, runner-up 8, both semi-final losers 6");
 
   // start over: back to registration with the players kept
-  r = await oA.req(`/admin/games/${tg.id}/tictactoe/reset`, {});
+  r = await oA.req(`/admin/games/${tg.id}/knockout/reset`, {});
   ok(r.status === 403, "only an admin can start the tournament over");
-  r = await admin.req(`/admin/games/${tg.id}/tictactoe/reset`, {});
+  r = await admin.req(`/admin/games/${tg.id}/knockout/reset`, {});
   t = await td();
   ok(r.status === 200 && t.state === "registration" && t.players === 11 && t.rounds.length === 0, "starting over reopens registration and keeps the players");
   // a small one: 3 players, one bye
-  await admin.req(`/admin/games/${tg.id}/tictactoe/reset`, { clearPlayers: true });
-  await admin.req(`/admin/games/${tg.id}/tictactoe/players`, { userIds: users.slice(0, 3).map((u) => u.id) });
-  r = await admin.req(`/admin/games/${tg.id}/tictactoe/start`, {});
+  await admin.req(`/admin/games/${tg.id}/knockout/reset`, { clearPlayers: true });
+  await admin.req(`/admin/games/${tg.id}/knockout/players`, { userIds: users.slice(0, 3).map((u) => u.id) });
+  r = await admin.req(`/admin/games/${tg.id}/knockout/start`, {});
   t = await td();
   ok(r.status === 200 && t.roundsCount === 2 && t.rounds[0].matches.filter((m) => m.bye).length === 1 && t.rounds[1].matches[0].a && !t.rounds[1].matches[0].ready, "3 players: one bye, then a final waiting for the other match");
   const real = t.rounds[0].matches.find((m) => !m.bye);
@@ -955,8 +955,35 @@ ok(forged.status === 404, "forged QR rejected");
   await admin.req(`/admin/ttt-matches/${t.rounds[1].matches[0].id}/winner`, { userId: t.rounds[1].matches[0].b.userId });
   t = await td();
   ok(t.state === "done" && t.rounds.length === 2, "a 3 player tournament finishes");
-  await admin.req(`/admin/games/${tg.id}/tictactoe/reset`, { clearPlayers: true });
+  await admin.req(`/admin/games/${tg.id}/knockout/reset`, { clearPlayers: true });
   await admin.req(`/admin/games/${tg.id}`, { status: "upcoming" }, "PATCH");
+}
+
+// ---- Colour Blind runs on the same tournament system, independently of the tic-tac-toe one
+{
+  const cb = g("colour-blind"), cupG = g("cup-flip-tic-tac-toe");
+  ok(cb.type === "knockout" && cb.kind === "individual" && cupG.type === "knockout", "Colour Blind and Paper Cup Flip both use the tournament system");
+  const kd = async (game) => (await admin.req(`/admin/games/${game.id}`)).j.knockout;
+  await admin.req(`/admin/games/${cb.id}`, { status: "live" }, "PATCH");
+  const four = users.slice(0, 4);
+  const joined = await Promise.all(four.map((u) => u.c.req(`/games/${cb.id}/join`, {})));
+  ok(joined.every((x) => x.status === 200), "players register for Colour Blind from their phone");
+  let k = await kd(cb);
+  ok(k.state === "registration" && k.players === 4 && (await kd(cupG)).players === 0, "the two tournaments keep their own player lists");
+  r = await admin.req(`/admin/games/${cb.id}/knockout/start`, {});
+  k = await kd(cb);
+  ok(r.status === 200 && k.roundsCount === 2 && k.rounds[0].matches.length === 2 && k.rounds[1].matches.length === 1 && !k.rounds[0].matches.some((m) => m.bye), "4 players: two semi-finals and a final, no byes");
+  ok((await kd(cupG)).state === "registration", "starting Colour Blind doesn't start the other tournament");
+  for (const m of k.rounds[0].matches) await admin.req(`/admin/ttt-matches/${m.id}/winner`, { userId: m.a.userId });
+  k = await kd(cb);
+  ok(k.rounds[1].matches[0].ready, "both semi-final winners are in the final");
+  await admin.req(`/admin/ttt-matches/${k.rounds[1].matches[0].id}/winner`, { userId: k.rounds[1].matches[0].b.userId });
+  k = await kd(cb);
+  ok(k.state === "done" && k.champion.userId === k.rounds[1].matches[0].b.userId, "the final decides the Colour Blind champion");
+  const cbLb = (await admin.req(`/leaderboard/individual?game=${cb.id}`)).j.top;
+  ok(cbLb.length === 4 && cbLb[0].detail === "Champion" && cbLb[1].detail === "Runner-up" && cbLb.filter((x) => x.rank === 3).length === 2, "Colour Blind standings: champion, runner-up, two level 3rd");
+  await admin.req(`/admin/games/${cb.id}/knockout/reset`, { clearPlayers: true });
+  await admin.req(`/admin/games/${cb.id}`, { status: "upcoming" }, "PATCH");
 }
 
 // ---- one-time sign-in code (moves a sign-in into the installed app)

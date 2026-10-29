@@ -3,7 +3,7 @@ import { HttpError, audit, now, shortName, type AppEnv, type Ctx, type Env, type
 import { notifyNewPlayers, notifyRemoved } from "./notify";
 
 // ---------------------------------------------------------------------------
-// Paper Cup Flip Tic-Tac-Toe: a knockout tournament.
+// Knockout tournament games (Paper Cup Flip Tic-Tac-Toe, Colour Blind).
 //  1. Players join from the app while the game is live (organisers can add people too).
 //  2. An organiser starts it: everyone is matched at random, and byes fill the first round up to a power of two.
 //  3. Organisers pick the winner of each match. Winners move on until the final.
@@ -87,7 +87,7 @@ export function drawBracket(ids: number[], random: () => number = Math.random): 
 
 export async function loadTtt(env: Env, gameId: number) {
   const g = await env.DB.prepare("SELECT id, name, type, location, status, config FROM games WHERE id = ?").bind(gameId).first<{ id: number; name: string; type: string; location: string; status: string; config: string }>();
-  if (!g || g.type !== "tictactoe") throw new HttpError(404, "Not a tic-tac-toe tournament");
+  if (!g || g.type !== "knockout") throw new HttpError(404, "Not a knockout tournament");
   const { results } = await env.DB.prepare("SELECT id, game_id, round, slot, a_user, b_user, winner_id, status, bye, notified FROM ttt_matches WHERE game_id = ? ORDER BY round, slot").bind(gameId).all<TttMatch>();
   return { game: g, config: parseConfig(g.config), matches: results };
 }
@@ -107,7 +107,7 @@ export function tttState(config: TttConfig, matches: TttMatch[]) {
 }
 
 // For the leaderboard: once the tournament is over, champion first, then the finalist, the semi-final losers (level), and so on
-export async function rankTictactoe(env: Env, gameId: number) {
+export async function rankKnockout(env: Env, gameId: number) {
   const d = await loadTtt(env, gameId);
   if (tttState(d.config, d.matches) !== "done") return [];
   const R = d.config.rounds;
@@ -236,7 +236,7 @@ tttPublicRoutes.delete("/games/:id/join", async (c) => {
 });
 
 // Organisers add people (for anyone without a phone, or to help)
-tttAdminRoutes.post("/games/:id/tictactoe/players", async (c) => {
+tttAdminRoutes.post("/games/:id/knockout/players", async (c) => {
   const gameId = Number(c.req.param("id"));
   await registration(c.env, gameId);
   const body = await c.req.json<{ userIds?: number[]; scope?: "all" | "checked_in" | "team"; teamId?: number }>();
@@ -256,11 +256,11 @@ tttAdminRoutes.post("/games/:id/tictactoe/players", async (c) => {
   const res = await c.env.DB.prepare(`INSERT OR IGNORE INTO game_players (game_id, user_id, added_by, added_at) SELECT ?, id, ?, ? FROM users WHERE ${where}`).bind(gameId, me(c).id, now(), ...args).run();
   await notifyNewPlayers(c.env, gameId);
   const total = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM game_players WHERE game_id = ?").bind(gameId).first<{ n: number }>();
-  await audit(c.env, me(c).id, "tictactoe.add", { gameId, added: res.meta.changes });
+  await audit(c.env, me(c).id, "knockout.add", { gameId, added: res.meta.changes });
   return c.json({ added: res.meta.changes, total: total?.n ?? 0 });
 });
 
-tttAdminRoutes.delete("/games/:id/tictactoe/players/:userId", async (c) => {
+tttAdminRoutes.delete("/games/:id/knockout/players/:userId", async (c) => {
   const gameId = Number(c.req.param("id"));
   await registration(c.env, gameId);
   const userId = Number(c.req.param("userId"));
@@ -270,7 +270,7 @@ tttAdminRoutes.delete("/games/:id/tictactoe/players/:userId", async (c) => {
 });
 
 // Close registration and draw the bracket
-tttAdminRoutes.post("/games/:id/tictactoe/start", async (c) => {
+tttAdminRoutes.post("/games/:id/knockout/start", async (c) => {
   const gameId = Number(c.req.param("id"));
   const d = await registration(c.env, gameId);
   const { results: roster } = await c.env.DB.prepare("SELECT user_id AS id FROM game_players WHERE game_id = ?").bind(gameId).all<{ id: number }>();
@@ -285,12 +285,12 @@ tttAdminRoutes.post("/games/:id/tictactoe/start", async (c) => {
     ),
   );
   await notifyReady(c.env, gameId);
-  await audit(c.env, me(c).id, "tictactoe.start", { gameId, players: roster.length, rounds });
+  await audit(c.env, me(c).id, "knockout.start", { gameId, players: roster.length, rounds });
   return c.json({ ok: true, players: roster.length, rounds, game: d.game.name });
 });
 
 // Start over: back to registration, keeping the players who joined (admin)
-tttAdminRoutes.post("/games/:id/tictactoe/reset", async (c) => {
+tttAdminRoutes.post("/games/:id/knockout/reset", async (c) => {
   if (me(c).role !== "admin") throw new HttpError(403, "Admins only");
   const gameId = Number(c.req.param("id"));
   await loadTtt(c.env, gameId);
@@ -298,7 +298,7 @@ tttAdminRoutes.post("/games/:id/tictactoe/reset", async (c) => {
   const stmts = [c.env.DB.prepare("DELETE FROM ttt_matches WHERE game_id = ?").bind(gameId), c.env.DB.prepare(`UPDATE games SET config = '{"state":"registration"}' WHERE id = ?`).bind(gameId)];
   if (clearPlayers) stmts.push(c.env.DB.prepare("DELETE FROM game_players WHERE game_id = ?").bind(gameId));
   await c.env.DB.batch(stmts);
-  await audit(c.env, me(c).id, "tictactoe.reset", { gameId });
+  await audit(c.env, me(c).id, "knockout.reset", { gameId });
   return c.json({ ok: true });
 });
 
@@ -341,6 +341,6 @@ tttAdminRoutes.post("/ttt-matches/:id/winner", async (c) => {
     await c.env.DB.prepare(`UPDATE ttt_matches SET ${col} = ?, notified = 0 WHERE id = ?`).bind(winner, next.id).run();
     await notifyReady(c.env, m.game_id);
   }
-  await audit(c.env, me(c).id, "tictactoe.winner", { matchId: m.id, winner });
+  await audit(c.env, me(c).id, "knockout.winner", { matchId: m.id, winner });
   return c.json({ ok: true });
 });

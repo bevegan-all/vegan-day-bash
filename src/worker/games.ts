@@ -85,10 +85,19 @@ export async function buildGameDetail(env: Env, gameId: number, viewer: User | n
         )
           .bind(m.id)
           .all<{ id: number; ord: number; teamId: number; phase: string; phaseEndsAt: number | null; result: string | null; players: string | null; meme: string | null }>();
+        const { results: acting } = await env.DB.prepare(
+          `SELECT p.turn_id AS turnId, u.id, u.display_name AS name FROM meme_turn_players p
+             JOIN users u ON u.id = p.user_id JOIN meme_turns t ON t.id = p.turn_id
+            WHERE t.match_id = ? ORDER BY p.added_at, u.id`,
+        )
+          .bind(m.id)
+          .all<{ turnId: number; id: number; name: string }>();
+        const playersOf = new Map<number, TurnPlayer[]>();
+        for (const a of acting) playersOf.set(a.turnId, [...(playersOf.get(a.turnId) ?? []), { id: a.id, name: a.name }]);
         const totals: Record<number, number> = {};
         const turns = rows.map((r) => {
           if (r.result === "point") totals[r.teamId] = (totals[r.teamId] ?? 0) + 1;
-          const players: TurnPlayer[] = r.players ? JSON.parse(r.players) : [];
+          const players = playersOf.get(r.id) ?? [];
           return {
             id: r.id,
             ord: r.ord,

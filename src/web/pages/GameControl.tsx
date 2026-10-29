@@ -31,7 +31,10 @@ const STATUSES = [
 export function GameControl() {
   const { id } = useParams();
   const { me } = useAuth();
-  const { data, error, loading, reload } = usePoll<GameDetail>(`/admin/games/${id}`, 8000);
+  const [every, setEvery] = useState(8000);
+  const { data, error, loading, reload } = usePoll<GameDetail>(`/admin/games/${id}`, every);
+  const live = data?.type === "meme" || data?.type === "shark";
+  useEffect(() => setEvery(live ? 4000 : 8000), [live]);
 
   async function setStatus(status: string) {
     if (await call(`/admin/games/${id}`, { status }, "PATCH")) reload();
@@ -657,15 +660,23 @@ function TurnPanel({
 }) {
   const now = useClock(offset);
   const [meme, setMeme] = useState("");
-  const [players, setPlayers] = useState<Person[]>([]);
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const acting = turn.phase === "acting";
 
   async function startTurn() {
     setBusy(true);
-    if (await call(`/admin/meme-turns/${turn.id}/start`, { meme, playerIds: players.map((p) => p.id) })) reload();
+    if (await call(`/admin/meme-turns/${turn.id}/start`, { meme })) reload();
     setBusy(false);
+  }
+
+  // The acting players live on the server, so every organiser sees the same list straight away
+  async function addPlayer(p: Person) {
+    if (await call(`/admin/meme-turns/${turn.id}/players`, { userId: p.id })) reload();
+  }
+
+  async function removePlayer(userId: number) {
+    if (await call(`/admin/meme-turns/${turn.id}/players/${userId}`, undefined, "DELETE")) reload();
   }
 
   async function result(r: "point" | "fail") {
@@ -723,18 +734,19 @@ function TurnPanel({
           </div>
 
           <div>
+            <div className="mb-1.5 text-sm font-medium text-muted">Who is acting? (optional, shared between organisers, shown to everyone)</div>
             <div className="flex flex-wrap items-center gap-2">
-              {players.map((p) => (
+              {turn.players.map((p) => (
                 <span key={p.id} className="flex items-center gap-1 rounded-full bg-sunken py-1 pl-3 pr-1 text-sm font-medium">
                   {p.name}
-                  <button className="rounded-full p-1 text-subtle hover:text-fg" aria-label={`Remove ${p.name}`} onClick={() => setPlayers(players.filter((x) => x.id !== p.id))}>
+                  <button className="rounded-full p-1 text-subtle hover:text-fg" aria-label={`Remove ${p.name}`} onClick={() => removePlayer(p.id)}>
                     <X size={14} />
                   </button>
                 </span>
               ))}
-              {players.length < 3 && (
-                <Btn variant="ghost" size="sm" onClick={() => setPicking(true)}>
-                  <ScanLine size={16} /> {players.length ? "Add another player" : "Note who is acting (optional)"}
+              {turn.players.length < 3 && (
+                <Btn variant="secondary" size="sm" onClick={() => setPicking(true)}>
+                  <ScanLine size={16} /> Add players
                 </Btn>
               )}
             </div>
@@ -742,7 +754,7 @@ function TurnPanel({
               <PersonPickerModal
                 title="Who is acting?"
                 multi
-                onPick={(p) => setPlayers((list) => (list.length >= 3 || list.some((x) => x.id === p.id) ? list : [...list, p]))}
+                onPick={(p) => addPlayer(p)}
                 onClose={() => setPicking(false)}
               />
             )}

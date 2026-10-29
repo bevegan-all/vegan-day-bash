@@ -115,7 +115,11 @@ notifyRoutes.get("/pulse", async (c) => {
     const scores: Record<number, number> = { [curTurn.team_a]: 0, [curTurn.team_b]: 0 };
     for (const r of turns) if (r.result === "point") scores[r.team_id] += 1;
     const lastDone = [...turns].reverse().find((r) => r.phase === "done");
-    const names: { id: number; name: string }[] = curTurn.players ? JSON.parse(curTurn.players) : [];
+    const { results: names } = await c.env.DB.prepare(
+      "SELECT u.display_name AS name FROM meme_turn_players p JOIN users u ON u.id = p.user_id WHERE p.turn_id = ? ORDER BY p.added_at, u.id",
+    )
+      .bind(curTurn.id)
+      .all<{ name: string }>();
     meme = {
       gameId: curTurn.game_id,
       matchId: curTurn.match_id,

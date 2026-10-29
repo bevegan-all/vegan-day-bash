@@ -755,6 +755,44 @@ async function getTurn(c: Ctx, id: number) {
   return row;
 }
 
+const MAX_ACTING = 3;
+
+// One atomic statement: add the person only if the turn still has room. Safe when several organisers add at once.
+async function addTurnPlayer(env: Env, turnId: number, userId: number) {
+  const res = await env.DB.prepare(
+    `INSERT OR IGNORE INTO meme_turn_players (turn_id, user_id, added_at)
+     SELECT ?, id, ? FROM users WHERE id = ? AND (SELECT COUNT(*) FROM meme_turn_players WHERE turn_id = ?) < ${MAX_ACTING}`,
+  )
+    .bind(turnId, now(), userId, turnId)
+    .run();
+  return res.meta.changes > 0;
+}
+
+adminRoutes.post("/meme-turns/:id/players", async (c) => {
+  const t = await getTurn(c, Number(c.req.param("id")));
+  if (t.match_status === "done" || t.phase === "done") throw new HttpError(409, "This turn is finished");
+  const { userId } = await c.req.json<{ userId?: number }>();
+  const id = Number(userId);
+  if (!Number.isInteger(id)) throw new HttpError(400, "Pick a person");
+  const person = await c.env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(id).first();
+  if (!person) throw new HttpError(404, "No such person");
+  const added = await addTurnPlayer(c.env, t.id, id);
+  let duplicate = false;
+  if (!added) {
+    const there = await c.env.DB.prepare("SELECT 1 FROM meme_turn_players WHERE turn_id = ? AND user_id = ?").bind(t.id, id).first();
+    if (!there) throw new HttpError(409, `This turn already has ${MAX_ACTING} players`);
+    duplicate = true;
+  }
+  return c.json({ ok: true, duplicate });
+});
+
+adminRoutes.delete("/meme-turns/:id/players/:userId", async (c) => {
+  const t = await getTurn(c, Number(c.req.param("id")));
+  if (t.match_status === "done" || t.phase === "done") throw new HttpError(409, "This turn is finished");
+  await c.env.DB.prepare("DELETE FROM meme_turn_players WHERE turn_id = ? AND user_id = ?").bind(t.id, Number(c.req.param("userId"))).run();
+  return c.json({ ok: true });
+});
+
 adminRoutes.post("/meme-turns/:id/start", async (c) => {
   const t = await getTurn(c, Number(c.req.param("id")));
   if (t.match_status === "done") throw new HttpError(409, "This round is finished");
@@ -763,19 +801,16 @@ adminRoutes.post("/meme-turns/:id/start", async (c) => {
   if (earlier) throw new HttpError(409, "Finish the previous turn first");
   const body = await c.req.json<{ meme?: string; playerIds?: number[] }>().catch(() => ({} as { meme?: string; playerIds?: number[] }));
   const meme = String(body.meme ?? "").trim().slice(0, 40) || null;
-  // names come from the database, not from the phone
-  let players: { id: number; name: string }[] = [];
-  const ids = [...new Set((body.playerIds ?? []).map(Number))].filter((n) => Number.isInteger(n)).slice(0, 6);
-  if (ids.length) {
-    const { results } = await c.env.DB.prepare(`SELECT id, display_name AS name FROM users WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>();
-    players = results;
-  }
   const { act } = await memeConfig(c.env);
   const endsAt = now() + act * 1000;
-  await c.env.DB.prepare("UPDATE meme_turns SET phase = 'acting', phase_ends_at = ?, meme = ?, players = ? WHERE id = ?")
-    .bind(endsAt, meme, players.length ? JSON.stringify(players) : null, t.id)
+  // only one organiser can start a turn, even if two press the button together
+  const started = await c.env.DB.prepare("UPDATE meme_turns SET phase = 'acting', phase_ends_at = ?, meme = COALESCE(?, meme) WHERE id = ? AND phase = 'idle'")
+    .bind(endsAt, meme, t.id)
     .run();
-  await audit(c.env, me(c).id, "meme.start_turn", { turnId: t.id, meme, players: players.length });
+  if (!started.meta.changes) throw new HttpError(409, "This turn has already started");
+  const ids = [...new Set((body.playerIds ?? []).map(Number))].filter((n) => Number.isInteger(n));
+  for (const id of ids) await addTurnPlayer(c.env, t.id, id);
+  await audit(c.env, me(c).id, "meme.start_turn", { turnId: t.id, meme });
   return c.json({ ok: true, endsAt });
 });
 
@@ -784,7 +819,9 @@ adminRoutes.post("/meme-turns/:id/result", async (c) => {
   const { result } = await c.req.json<{ result?: string }>();
   if (result !== "point" && result !== "fail") throw new HttpError(400, "Choose point or fail");
   if (t.phase !== "acting") throw new HttpError(409, "Start the turn first");
-  await c.env.DB.prepare("UPDATE meme_turns SET phase = 'done', phase_ends_at = NULL, result = ? WHERE id = ?").bind(result, t.id).run();
+  // only the first tap counts if two organisers press Point and Fail together
+  const scored = await c.env.DB.prepare("UPDATE meme_turns SET phase = 'done', phase_ends_at = NULL, result = ? WHERE id = ? AND phase = 'acting'").bind(result, t.id).run();
+  if (!scored.meta.changes) throw new HttpError(409, "Another organiser already scored this turn");
   await audit(c.env, me(c).id, "meme.result", { turnId: t.id, result });
 
   // after the last turn the higher score moves on by itself; level scores wait for the organiser
@@ -810,7 +847,10 @@ adminRoutes.post("/meme-turns/:id/reset", async (c) => {
   if (t.match_status === "done") throw new HttpError(409, "This round is finished. An admin can reset the bracket.");
   const later = await c.env.DB.prepare("SELECT 1 FROM meme_turns WHERE match_id = ? AND ord > ? AND phase != 'idle'").bind(t.match_id, t.ord).first();
   if (later) throw new HttpError(409, "Restart the later turns first");
-  await c.env.DB.prepare("UPDATE meme_turns SET phase = 'idle', phase_ends_at = NULL, result = NULL, meme = NULL, players = NULL WHERE id = ?").bind(t.id).run();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE meme_turns SET phase = 'idle', phase_ends_at = NULL, result = NULL, meme = NULL, players = NULL WHERE id = ?").bind(t.id),
+    c.env.DB.prepare("DELETE FROM meme_turn_players WHERE turn_id = ?").bind(t.id),
+  ]);
   await audit(c.env, me(c).id, "meme.reset_turn", { turnId: t.id });
   return c.json({ ok: true });
 });

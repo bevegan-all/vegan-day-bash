@@ -113,6 +113,60 @@ ok(r.status === 200, "an acting turn can be restarted");
 m1 = await detailOf(s1.id);
 ok(m1.turns[0].phase === "idle" && m1.turns[0].meme === null, "restarted turn is waiting again");
 
+// ---- several organisers working on the same turn at the same time
+{
+  const mkOrg = async (name) => {
+    const made = await admin.req("/admin/users", { name, role: "organiser" });
+    const cl = new Client();
+    await cl.req("/auth/login", { username: made.j.username, password: made.j.password });
+    return cl;
+  };
+  const [orgA, orgB, orgC] = [await mkOrg("Organiser A"), await mkOrg("Organiser B"), await mkOrg("Organiser C")];
+  const turnId = m1.turns[0].id;
+  const add = (org, u) => org.req(`/admin/meme-turns/${turnId}/players`, { userId: u.id });
+  const seen = async (org) => (await org.req(`/admin/games/${meme.id}`)).j.matches.find((x) => x.id === s1.id).turns[0].players.length;
+
+  let rs = await Promise.all([add(orgA, users[0]), add(orgB, users[1]), add(orgC, users[2])]);
+  ok(rs.every((x) => x.status === 200), "3 organisers add 3 different players at the same moment: all 3 saved");
+  const counts = await Promise.all([orgA, orgB, orgC, admin].map(seen));
+  ok(counts.every((n) => n === 3), "every organiser sees all 3 players (" + counts.join(", ") + ")");
+  const watcher = (await users[5].c.req("/pulse")).j;
+  ok(watcher.meme && watcher.meme.players.length === 3, "players' phones show the 3 acting players before the turn even starts");
+
+  rs = await Promise.all([add(orgA, users[0]), add(orgB, users[0]), add(orgC, users[0])]);
+  ok(rs.every((x) => x.status === 200) && (await seen(admin)) === 3, "the same player added by 3 organisers at once is stored once");
+  r = await add(orgA, users[3]);
+  ok(r.status === 409, "a 4th player is refused (3 is the limit)");
+
+  r = await orgB.req(`/admin/meme-turns/${turnId}/players/${users[1].id}`, undefined, "DELETE");
+  ok(r.status === 200 && (await seen(orgC)) === 2, "one organiser removes a player and the others see 2");
+
+  // 4 organisers race for the one free place
+  rs = await Promise.all([add(orgA, users[3]), add(orgB, users[4]), add(orgC, users[5]), add(admin, users[6])]);
+  const won = rs.filter((x) => x.status === 200).length, refused = rs.filter((x) => x.status === 409).length;
+  ok(won === 1 && refused === 3 && (await seen(admin)) === 3, `4 organisers race for 1 free place: ${won} got it, ${refused} were told it is full`);
+
+  // starting without any extra input works, the clock is 1 minute, and the players stay on the turn
+  const startedAt = Date.now();
+  r = await turnApi(turnId, "start");
+  ok(r.status === 200 && Math.abs(r.j.endsAt - startedAt - 60000) < 3000, `the acting clock is 1 minute (ends in ${Math.round((r.j.endsAt - startedAt) / 1000)}s)`);
+  r = await turnApi(turnId, "start");
+  ok(r.status === 409, "pressing Start twice only starts the turn once");
+  ok((await seen(admin)) === 3, "the players are kept when the turn starts");
+
+  // two organisers tap Point and Fail together: only the first counts
+  rs = await Promise.all([orgA.req(`/admin/meme-turns/${turnId}/result`, { result: "point" }), orgB.req(`/admin/meme-turns/${turnId}/result`, { result: "fail" })]);
+  const okCount = rs.filter((x) => x.status === 200).length;
+  ok(okCount === 1 && rs.filter((x) => x.status === 409).length === 1, "Point and Fail pressed together by two organisers: exactly one is counted");
+  r = await turnApi(turnId, "reset");
+  ok(r.status === 200 && (await seen(admin)) === 0, "restarting a turn also clears its players");
+
+  // a turn with no players at all is fine
+  r = await turnApi(turnId, "start", { meme: "2" });
+  ok(r.status === 200 && (await seen(admin)) === 0, "adding players is optional: a turn starts with none");
+  r = await turnApi(turnId, "reset");
+}
+
 // play the whole match: Cow scores 4, Chicken 2
 r = await playOut(s1.id, [P, F, P, P, P, F, F, P, P, F]);
 ok(r.status === 200 && r.j.winner === 1, "Cow wins semi 1 automatically (4 to 2)");

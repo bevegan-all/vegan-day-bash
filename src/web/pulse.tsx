@@ -62,7 +62,7 @@ export function PulseProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!data) return;
     setOffset(data.serverNow - Date.now());
-    setEvery(data.shark?.phase === "voting" ? 4000 : data.shark ? 8000 : 20000);
+    setEvery(data.shark?.phase === "voting" ? 4000 : data.meme?.phase === "acting" ? 5000 : data.shark || data.meme ? 8000 : 20000);
   }, [data]);
 
   useEffect(() => {

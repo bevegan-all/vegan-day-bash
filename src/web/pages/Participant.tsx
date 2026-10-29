@@ -8,6 +8,7 @@ import { isOrganiser, useAuth } from "../auth";
 import { TeamIcon } from "../art";
 import { BoardList, GameCard, GameThumb, LocationTag, MatchCard, Podium } from "../components";
 import { SharkLiveCard } from "../shark";
+import { MemeLiveCard } from "../meme";
 import { AlertsToggle, usePulse } from "../pulse";
 import { InstallCard } from "../install";
 import { Avatar, Btn, Card, ErrorBox, Page, RankBadge, SectionLabel, Segmented, Spinner, StatusPill, TeamChip, TeamMark, ThemeSelect } from "../ui";
@@ -54,6 +55,7 @@ export function Home() {
       )}
 
       {pulse?.shark && <SharkLiveCard shark={pulse.shark} offset={offset} onVoted={reloadPulse} />}
+      {pulse?.meme && <MemeLiveCard meme={pulse.meme} offset={offset} />}
 
       {live.length > 0 && (
         <section>
@@ -167,7 +169,8 @@ export function GameView() {
   const { data, error, loading, reload } = usePoll<GameDetail>(`/games/${id}`, 15000);
   const { pulse, reload: reloadPulse, offset } = usePulse();
   const turn = pulse?.shark && String(pulse.shark.gameId) === id ? pulse.shark : null;
-  const turnKey = turn ? `${turn.pitchId}:${turn.phase}` : "";
+  const memeTurn = pulse?.meme && String(pulse.meme.gameId) === id ? pulse.meme : null;
+  const turnKey = turn ? `${turn.pitchId}:${turn.phase}` : memeTurn ? `m${memeTurn.turnId}:${memeTurn.phase}:${memeTurn.last?.ord ?? 0}` : "";
   useEffect(() => {
     if (turnKey) reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -191,6 +194,7 @@ export function GameView() {
         <>
           <GameThumb slug={data.slug} name={data.name} className="aspect-[16/7] w-full rounded-xl border border-line" />
           {turn && <SharkLiveCard shark={turn} offset={offset} onVoted={reloadPulse} />}
+          {memeTurn && <MemeLiveCard meme={memeTurn} offset={offset} />}
           <Card>
             <div className="mb-3 flex items-center gap-2">
               <StatusPill status={data.status} />

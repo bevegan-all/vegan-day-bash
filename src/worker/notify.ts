@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { HttpError, getSettings, now, type AppEnv, type Env, type User } from "./lib";
+import { HttpError, getSettings, now, shortName, type AppEnv, type Env, type User } from "./lib";
 
 export const notifyRoutes = new Hono<AppEnv>();
 
@@ -32,7 +32,7 @@ export async function notifyRemoved(env: Env, gameId: number, userId: number) {
 // One light call, polled for the whole app: new alerts, live games, and the Shark Tank turn in progress.
 notifyRoutes.get("/pulse", async (c) => {
   const user = need(c.get("user"));
-  const [notifs, live, mine, pitches, settings] = await Promise.all([
+  const [notifs, live, mine, pitches, settings, memeRows] = await Promise.all([
     c.env.DB.prepare(
       `SELECT id, kind, title, body, game_id AS gameId, created_at AS at FROM notifications
         WHERE user_id = ? AND read_at IS NULL ORDER BY id DESC LIMIT 20`,
@@ -60,6 +60,23 @@ notifyRoutes.get("/pulse", async (c) => {
       team_name: string;
     }>(),
     getSettings(c.env),
+    c.env.DB.prepare(
+      `SELECT t.id, t.match_id, t.ord, t.team_id, t.phase, t.phase_ends_at, t.result, t.players, m.stage, m.team_a, m.team_b, m.game_id
+         FROM meme_turns t JOIN matches m ON m.id = t.match_id WHERE m.status = 'live' ORDER BY m.id, t.ord`,
+    ).all<{
+      id: number;
+      match_id: number;
+      ord: number;
+      team_id: number;
+      phase: string;
+      phase_ends_at: number | null;
+      result: string | null;
+      players: string | null;
+      stage: string;
+      team_a: number;
+      team_b: number;
+      game_id: number;
+    }>(),
   ]);
   const inGames = new Set(mine.results.map((r) => r.game_id));
 
@@ -89,11 +106,40 @@ notifyRoutes.get("/pulse", async (c) => {
       myRating,
     };
   }
+
+  // Meme Charades: the turn in progress, the score and the last result
+  let meme = null;
+  const curTurn = memeRows.results.find((r) => r.phase !== "done");
+  if (curTurn) {
+    const turns = memeRows.results.filter((r) => r.match_id === curTurn.match_id);
+    const scores: Record<number, number> = { [curTurn.team_a]: 0, [curTurn.team_b]: 0 };
+    for (const r of turns) if (r.result === "point") scores[r.team_id] += 1;
+    const lastDone = [...turns].reverse().find((r) => r.phase === "done");
+    const names: { id: number; name: string }[] = curTurn.players ? JSON.parse(curTurn.players) : [];
+    meme = {
+      gameId: curTurn.game_id,
+      matchId: curTurn.match_id,
+      stage: curTurn.stage,
+      turnId: curTurn.id,
+      ord: curTurn.ord,
+      total: turns.length,
+      teamId: curTurn.team_id,
+      teamA: curTurn.team_a,
+      teamB: curTurn.team_b,
+      phase: curTurn.phase,
+      endsAt: curTurn.phase_ends_at,
+      players: names.map((p) => shortName(p.name)),
+      youActing: user.team_id === curTurn.team_id,
+      scores,
+      last: lastDone ? { teamId: lastDone.team_id, result: lastDone.result, ord: lastDone.ord } : null,
+    };
+  }
   return c.json({
     serverNow: now(),
     notifications: notifs.results,
     live: live.results.map((g) => ({ ...g, youIn: inGames.has(g.id) })),
     shark,
+    meme,
   });
 });
 

@@ -48,36 +48,106 @@ ok(r.status === 403, "participant blocked from creating users");
 const games = (await admin.req("/games")).j.games;
 const g = (slug) => games.find((x) => x.slug === slug);
 
-// ---- Meme Charades
+// ---- Meme Charades: turn by turn
 const meme = g("meme-charades");
+const turnApi = (id, action, body) => admin.req(`/admin/meme-turns/${id}/${action}`, body ?? {});
+const P = "point", F = "fail";
+const detailOf = async (matchId) => (await admin.req(`/admin/games/${meme.id}`)).j.matches.find((x) => x.id === matchId);
+// plays every turn of a match that is not finished yet, in order; returns the last result response
+async function playOut(matchId, outcomes) {
+  let last;
+  const m = await detailOf(matchId);
+  for (const [i, turn] of m.turns.entries()) {
+    if (turn.phase === "done") continue;
+    if (turn.phase === "idle") await turnApi(turn.id, "start");
+    last = await turnApi(turn.id, "result", { result: outcomes[i] });
+  }
+  return last;
+}
+
 r = await admin.req(`/admin/games/${meme.id}/bracket`, {});
 ok(r.status === 200, "meme bracket created");
 let d = (await admin.req(`/admin/games/${meme.id}`)).j;
 const [s1, s2] = d.matches;
 ok(s1.teamA === 1 && s1.teamB === 2 && s2.teamA === 3 && s2.teamB === 4, "semis are Cow v Chicken, Goat v Pig");
-for (let round = 1; round <= 5; round++) {
-  await admin.req(`/admin/matches/${s1.id}/rounds`, { round, scores: { 1: 2, 2: 1 } });
-  await admin.req(`/admin/matches/${s2.id}/rounds`, { round, scores: { 3: 1, 4: 1 } });
-}
+ok(d.meme.act === 60 && d.meme.perTeam === 5 && d.meme.count === 16, "game detail has the meme settings");
+
+r = await admin.req(`/admin/matches/${s1.id}/start-round`, { firstTeam: 3 });
+ok(r.status === 400, "first team must be in the match");
+r = await admin.req(`/admin/matches/${s1.id}/start-round`, { firstTeam: 1 });
+ok(r.status === 200, "round started with Cow going first");
+r = await admin.req(`/admin/matches/${s1.id}/start-round`, { firstTeam: 1 });
+ok(r.status === 409, "a round can only be started once");
+r = await admin.req(`/admin/games/${meme.id}/bracket`, { pairs: [[1, 3], [2, 4]] });
+ok(r.status === 409, "matchups locked once a round has started");
+
+let m1 = await detailOf(s1.id);
+ok(m1.turns.length === 10 && m1.turns.every((x, i) => x.ord === i + 1 && x.teamId === (i % 2 === 0 ? 1 : 2)), "10 turns, 5 each, taken alternately starting with Cow");
+let pu = (await users[0].c.req("/pulse")).j;
+ok(pu.meme && pu.meme.phase === "idle" && pu.meme.teamId === 1 && pu.meme.ord === 1 && pu.meme.total === 10, "players see Cow is up next (turn 1 of 10)");
+
+// turn order is enforced
+r = await turnApi(m1.turns[1].id, "start");
+ok(r.status === 409, "turn 2 can't start before turn 1 is done");
+r = await turnApi(m1.turns[0].id, "result", { result: P });
+ok(r.status === 409, "can't give a result before the turn has started");
+
+// start turn 1 with a meme number and an acting player
+const actor = users.find((u) => u.team === 1);
+r = await turnApi(m1.turns[0].id, "start", { meme: "7", playerIds: [actor.id] });
+ok(r.status === 200 && r.j.endsAt > Date.now() + 50000, "turn started with a 60 second server clock");
+pu = (await users[1].c.req("/pulse")).j;
+ok(pu.meme.phase === "acting" && pu.meme.endsAt > pu.serverNow && pu.meme.players.length === 1, "everyone sees the turn is being acted, with the clock and the acting player");
+ok(pu.meme.youActing === (users[1].team === 1), "players know whether it's their team's turn");
+ok(!JSON.stringify(pu).includes('"7"') && !JSON.stringify(pu).includes("meme\":\"7"), "the meme number is not in what players receive");
+const playerView = (await users[1].c.req(`/games/${meme.id}`)).j;
+ok(!JSON.stringify(playerView).includes('"meme":"7"'), "the meme number is not in the game page for players");
+const organiserView = await detailOf(s1.id);
+ok(organiserView.turns[0].meme === "7", "organisers can see the meme number");
+r = await turnApi(m1.turns[0].id, "result", { result: "maybe" });
+ok(r.status === 400, "a result must be point or fail");
+
+// a turn can be restarted
+r = await turnApi(m1.turns[0].id, "reset");
+ok(r.status === 200, "an acting turn can be restarted");
+m1 = await detailOf(s1.id);
+ok(m1.turns[0].phase === "idle" && m1.turns[0].meme === null, "restarted turn is waiting again");
+
+// play the whole match: Cow scores 4, Chicken 2
+r = await playOut(s1.id, [P, F, P, P, P, F, F, P, P, F]);
+ok(r.status === 200 && r.j.winner === 1, "Cow wins semi 1 automatically (4 to 2)");
+m1 = await detailOf(s1.id);
+ok(m1.status === "done" && m1.totals[1] === 4 && m1.totals[2] === 2, "scores are 4 to 2");
+r = await turnApi(m1.turns[0].id, "reset");
+ok(r.status === 409, "a finished round can't be changed");
+
+// semi 2 ends level: the organiser chooses who moves forward
+r = await admin.req(`/admin/matches/${s2.id}/start-round`, { firstTeam: 3 });
+r = await playOut(s2.id, [P, P, P, P, P, P, F, F, F, F]);
+ok(r.status === 200 && r.j.tie === true && r.j.winner === null, "level scores: no winner is chosen automatically");
 r = await admin.req(`/admin/matches/${s2.id}/finish`, {});
-ok(r.status === 409 && /tie/i.test(r.j.error), "tie blocks finish");
-await admin.req(`/admin/matches/${s2.id}/rounds`, { round: 6, scores: { 3: 0, 4: 1 } });
-r = await admin.req(`/admin/matches/${s1.id}/finish`, {});
-ok(r.status === 200 && r.j.winner === 1, "semi1 won by Cow");
-r = await admin.req(`/admin/matches/${s2.id}/finish`, {});
-ok(r.status === 200 && r.j.winner === 4, "semi2 won by Pig after sudden death");
+ok(r.status === 409 && /tie/i.test(r.j.error), "finishing a tied match without choosing is refused");
+r = await users[0].c.req(`/admin/matches/${s2.id}/finish`, { winnerTeam: 4 });
+ok(r.status === 403, "players can't choose the winner");
+r = await admin.req(`/admin/matches/${s2.id}/finish`, { winnerTeam: 1 });
+ok(r.status === 409, "the winner must be one of the two teams");
+r = await admin.req(`/admin/matches/${s2.id}/finish`, { winnerTeam: 4 });
+ok(r.status === 200 && r.j.winner === 4, "organiser chose Pig to move forward");
+
+// the final works the same way
 d = (await admin.req(`/admin/games/${meme.id}`)).j;
 const fin = d.matches.find((m) => m.stage === "final");
 ok(fin && fin.teamA === 1 && fin.teamB === 4, "final auto-created Cow v Pig");
-await admin.req(`/admin/matches/${fin.id}/rounds`, { round: 1, scores: { 1: 3, 4: 5 } });
-r = await admin.req(`/admin/matches/${fin.id}/finish`, {});
-ok(r.j.winner === 4, "final won by Pig");
+r = await admin.req(`/admin/matches/${fin.id}/start-round`, { firstTeam: 4 });
+r = await playOut(fin.id, [P, P, P, F, P, P, P, F, F, F]);
+ok(r.status === 200 && r.j.winner === 4, "Pig wins the final (4 to 2)");
 let tb = (await users[0].c.req("/leaderboard/teams")).j.teams;
 const pts = Object.fromEntries(tb.map((t) => [t.teamId, t.total]));
 console.log("points after meme:", pts);
 ok(pts[1] === 8 && pts[4] === 15 && pts[2] === 0 && pts[3] === 0, "meme points: Cow 5+3, Pig 5+10");
-// idempotent re-finish
-await admin.req(`/admin/matches/${fin.id}/finish`, {});
+pu = (await users[0].c.req("/pulse")).j;
+ok(pu.meme === null, "no turn in progress after the final");
+r = await admin.req(`/admin/matches/${fin.id}/finish`, {});
 tb = (await users[0].c.req("/leaderboard/teams")).j.teams;
 ok(tb.find((t) => t.teamId === 4).total === 15, "re-finishing does not double points");
 

@@ -1,7 +1,8 @@
 import { useSearchParams } from "react-router-dom";
 import { Crown } from "lucide-react";
 import { teamById } from "../../shared/teams";
-import { usePoll, stageLabel, type Board, type GameDetail, type Pitch, type TeamRow } from "../api";
+import { usePoll, stageLabel, type Board, type GameDetail, type Match, type Pitch, type TeamRow } from "../api";
+import { ActTimer, TurnTracker } from "../meme";
 import { PhaseChip, PhaseTimer, useClock } from "../shark";
 import { GameArt, TeamIcon } from "../art";
 import { LocationTag, Podium } from "../components";
@@ -90,6 +91,45 @@ export function Screen() {
   );
 }
 
+// A Meme Charades match on the big screen: score, every turn so far, and the clock for the team acting now
+function ScreenMemeMatch({ match, offset }: { match: Match; offset: number }) {
+  const now = useClock(offset);
+  const turns = match.turns ?? [];
+  const active = turns.find((t) => t.phase !== "done");
+  const acting = active?.phase === "acting";
+  return (
+    <div className="mb-3 rounded-xl bg-sunken p-5">
+      <div className="mb-4 flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-widest text-subtle">{stageLabel(match.stage)}</span>
+        {active && (
+          <span className="text-sm font-semibold uppercase tracking-widest text-subtle">
+            Turn {active.ord} of {turns.length}
+          </span>
+        )}
+      </div>
+      <div className="mb-5 grid grid-cols-2 gap-4 text-center">
+        {[match.teamA, match.teamB].map((t, i) => (
+          <div key={i} className={match.winnerTeam === t ? "text-warn" : ""}>
+            <TeamName teamId={t} size={34} className="justify-center text-2xl font-semibold" />
+            <div className="text-7xl font-semibold tabular-nums tracking-tight">{t ? (match.totals?.[t] ?? 0) : "–"}</div>
+          </div>
+        ))}
+      </div>
+      {turns.length > 0 && <TurnTracker teamA={match.teamA} teamB={match.teamB} turns={turns} totals={match.totals ?? {}} big />}
+      {active && (
+        <div className="mt-5 rounded-lg border border-line bg-surface p-4 text-center">
+          <TeamName teamId={active.teamId} size={40} className="justify-center text-3xl font-semibold" />
+          <div className="mt-1 text-lg text-muted">{acting ? "is acting" : "acts next"}</div>
+          {active.players.length > 0 && <div className="mt-1 text-xl font-medium">{active.players.map((p) => p.name).join(" · ")}</div>}
+          <div className="mt-3">
+            <ActTimer endsAt={active.phaseEndsAt} now={now} active={acting} big />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // One team's pitch on the big screen: whose turn, which phase, and a large countdown
 function ScreenPitch({ pitch, winner, offset }: { pitch: Pitch; winner: boolean; offset: number }) {
   const now = useClock(offset);
@@ -136,19 +176,7 @@ function LiveGame({ game }: { game: GameDetail }) {
       </div>
 
       {game.type === "meme" &&
-        game.matches?.map((m) => (
-          <div key={m.id} className="mb-3 rounded-xl bg-sunken p-5">
-            <div className="mb-3 text-xs font-semibold uppercase tracking-widest text-subtle">{stageLabel(m.stage)}</div>
-            <div className="grid grid-cols-2 gap-4 text-center">
-              {[m.teamA, m.teamB].map((t, i) => (
-                <div key={i} className={m.winnerTeam === t ? "text-warn" : ""}>
-                  <TeamName teamId={t} size={34} className="justify-center text-2xl font-semibold" />
-                  <div className="text-7xl font-semibold tabular-nums tracking-tight">{t ? (m.totals?.[t] ?? 0) : "–"}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
+        game.matches?.map((m) => <ScreenMemeMatch key={m.id} match={m} offset={(game.serverNow ?? Date.now()) - Date.now()} />)}
 
       {game.type === "shark" &&
         game.matches?.map((m) => (

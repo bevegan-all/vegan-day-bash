@@ -135,11 +135,31 @@ export interface SharkLive {
   myRating: number | null;
 }
 
+// The Meme Charades turn in progress, as seen by one person
+export interface MemeLive {
+  gameId: number;
+  matchId: number;
+  stage: "semi1" | "semi2" | "final";
+  turnId: number;
+  ord: number;
+  total: number;
+  teamId: number;
+  teamA: number;
+  teamB: number;
+  phase: "idle" | "acting";
+  endsAt: number | null;
+  players: string[];
+  youActing: boolean;
+  scores: Record<number, number>;
+  last: { teamId: number; result: "point" | "fail"; ord: number } | null;
+}
+
 export interface Pulse {
   serverNow: number;
   notifications: AppNotification[];
   live: { id: number; slug: string; name: string; kind: string; type: string; location: string; youIn: boolean }[];
   shark: SharkLive | null;
+  meme: MemeLive | null;
 }
 
 export const fmtTime = (s: number) => {
@@ -197,6 +217,18 @@ export interface Pitch {
   canVote: boolean;
 }
 
+export interface MemeTurn {
+  id: number;
+  ord: number;
+  teamId: number;
+  phase: "idle" | "acting" | "done";
+  phaseEndsAt: number | null;
+  result: "point" | "fail" | null;
+  players: { id: number; name: string }[];
+  /** the meme number: sent to organisers only, it is the answer */
+  meme?: string | null;
+}
+
 export interface Match {
   id: number;
   stage: "semi1" | "semi2" | "final";
@@ -204,7 +236,7 @@ export interface Match {
   teamB: number | null;
   status: "pending" | "live" | "done";
   winnerTeam: number | null;
-  rounds?: { round: number; teamId: number; correct: number }[];
+  turns?: MemeTurn[];
   totals?: Record<number, number>;
   pitches?: Pitch[];
 }
@@ -213,6 +245,7 @@ export interface GameDetail extends GameSummary {
   rules: string;
   serverNow?: number;
   timers?: { prep: number; pitch: number; vote: number };
+  meme?: { act: number; perTeam: number; count: number };
   matches?: Match[];
   board?: Board;
   recent?: { id: number; value: number; at: number; name: string; teamId: number | null; matchRef: string | null }[];

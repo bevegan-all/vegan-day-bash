@@ -4,6 +4,7 @@ import { Check, Crown, MapPin } from "lucide-react";
 import { teamById } from "../shared/teams";
 import { PHASE_LABEL, api, fmtTime, stageLabel, type Board, type Finisher, type Match, type Pitch } from "./api";
 import { GameArt, TeamIcon } from "./art";
+import { TurnTracker } from "./meme";
 import { Card, RankBadge, StatusPill, TeamChip, TeamMark, toast, toastError } from "./ui";
 
 // Artwork tile for a game, used as a thumbnail or a banner (the parent sets the size or aspect ratio)
@@ -201,31 +202,19 @@ export function MatchCard({ match, kind, onChanged }: { match: Match; kind: "mem
                 <div className="mt-1 text-4xl font-semibold tabular-nums tracking-tight">{t ? (match.totals?.[t] ?? 0) : "–"}</div>
                 {winner && winner === t && (
                   <div className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-accent">
-                    <Crown size={13} /> Winner
+                    <Crown size={13} /> {match.stage === "final" ? "Champions" : "Advances"}
                   </div>
                 )}
               </div>
             ))}
           </div>
-          {match.rounds && match.rounds.length > 0 && (
-            <table className="mt-3 w-full text-center text-sm">
-              <thead>
-                <tr className="text-subtle">
-                  <th className="py-1 text-left text-xs font-semibold uppercase tracking-wider">Round</th>
-                  <th className="text-xs font-semibold">{teamById(match.teamA)?.name}</th>
-                  <th className="text-xs font-semibold">{teamById(match.teamB)?.name}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...new Set(match.rounds.map((r) => r.round))].map((n) => (
-                  <tr key={n} className="border-t border-line">
-                    <td className="py-1.5 text-left text-muted">{n}</td>
-                    <td className="tabular-nums">{match.rounds!.find((r) => r.round === n && r.teamId === match.teamA)?.correct ?? "–"}</td>
-                    <td className="tabular-nums">{match.rounds!.find((r) => r.round === n && r.teamId === match.teamB)?.correct ?? "–"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {match.turns && match.turns.length > 0 && (
+            <div className="mt-4">
+              <TurnTracker teamA={match.teamA} teamB={match.teamB} turns={match.turns} totals={match.totals ?? {}} />
+            </div>
+          )}
+          {match.turns && match.turns.length > 0 && match.status !== "done" && match.turns.every((t) => t.phase === "done") && (
+            <p className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-sm font-semibold text-warn">It's a tie. The organisers will decide who moves forward.</p>
           )}
         </>
       )}

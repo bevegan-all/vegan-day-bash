@@ -10,6 +10,20 @@ export async function sharkTimers(env: Env) {
   return { prep: n("shark_prep_seconds", 300), pitch: n("shark_pitch_seconds", 180), vote: n("shark_vote_seconds", 60) };
 }
 
+export async function memeConfig(env: Env) {
+  const s = await getSettings(env);
+  const n = (k: string, d: number) => {
+    const v = Number(s[k]);
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : d;
+  };
+  return { act: n("meme_act_seconds", 60), perTeam: n("meme_turns_per_team", 5), count: n("meme_count", 16) };
+}
+
+export interface TurnPlayer {
+  id: number;
+  name: string;
+}
+
 export async function pitchTally(env: Env, p: { id: number; team_id: number; team_a: number; team_b: number }) {
   const s = await getSettings(env);
   const opponent = p.team_id === p.team_a ? p.team_b : p.team_a;
@@ -66,12 +80,28 @@ export async function buildGameDetail(env: Env, gameId: number, viewer: User | n
     const out = [];
     for (const m of matches) {
       if (game.type === "meme") {
-        const { results: rounds } = await env.DB.prepare("SELECT round, team_id AS teamId, correct FROM meme_rounds WHERE match_id = ? ORDER BY round")
+        const { results: rows } = await env.DB.prepare(
+          "SELECT id, ord, team_id AS teamId, phase, phase_ends_at AS phaseEndsAt, result, players, meme FROM meme_turns WHERE match_id = ? ORDER BY ord",
+        )
           .bind(m.id)
-          .all<{ round: number; teamId: number; correct: number }>();
+          .all<{ id: number; ord: number; teamId: number; phase: string; phaseEndsAt: number | null; result: string | null; players: string | null; meme: string | null }>();
         const totals: Record<number, number> = {};
-        for (const r of rounds) totals[r.teamId] = (totals[r.teamId] ?? 0) + r.correct;
-        out.push({ ...m, rounds, totals });
+        const turns = rows.map((r) => {
+          if (r.result === "point") totals[r.teamId] = (totals[r.teamId] ?? 0) + 1;
+          const players: TurnPlayer[] = r.players ? JSON.parse(r.players) : [];
+          return {
+            id: r.id,
+            ord: r.ord,
+            teamId: r.teamId,
+            phase: r.phase,
+            phaseEndsAt: r.phaseEndsAt,
+            result: r.result,
+            players: players.map((p) => ({ id: p.id, name: organiser ? p.name : shortName(p.name) })),
+            // the meme number is the answer, so only organisers ever get it
+            ...(organiser ? { meme: r.meme } : {}),
+          };
+        });
+        out.push({ ...m, turns, totals });
       } else {
         const { results: pitches } = await env.DB.prepare(
           "SELECT id, team_id AS teamId, item, state, votes, avg, ord, phase, phase_ends_at AS phaseEndsAt FROM pitches WHERE match_id = ? ORDER BY ord, id",
@@ -102,7 +132,7 @@ export async function buildGameDetail(env: Env, gameId: number, viewer: User | n
         out.push({ ...m, pitches: enriched });
       }
     }
-    return { ...base, matches: out, serverNow: Date.now(), timers: game.type === "shark" ? await sharkTimers(env) : undefined };
+    return { ...base, matches: out, serverNow: Date.now(), timers: game.type === "shark" ? await sharkTimers(env) : undefined, meme: game.type === "meme" ? await memeConfig(env) : undefined };
   }
 
   if (game.type === "greenred" || game.type === "individual") {

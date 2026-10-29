@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Dices, MapPin, Minus, Play, Plus, ScanLine, Square, X } from "lucide-react";
+import { Check, Dices, MapPin, Play, ScanLine, Square, X } from "lucide-react";
 import { TEAMS, teamById } from "../../shared/teams";
-import { api, fmtTime, stageLabel, usePoll, type GameDetail, type Match, type Pitch } from "../api";
+import { api, fmtTime, stageLabel, usePoll, type GameDetail, type MemeTurn, type Match, type Pitch } from "../api";
 import { useAuth } from "../auth";
 import { TeamIcon } from "../art";
 import { GameThumb, LocationTag, Podium } from "../components";
 import { PersonField, PersonPickerModal, type Person } from "../pickers";
+import { ActTimer, TurnTracker } from "../meme";
 import { PhaseChip, PhaseSteps, PhaseTimer, useClock } from "../shark";
 import { Btn, Card, Countdown, ErrorBox, IconBtn, Modal, Page, RankBadge, SectionLabel, Spinner, StatusPill, TeamChip, TeamMark, TeamName, toast, toastError } from "../ui";
 
@@ -447,7 +448,7 @@ function BracketControl({ game, reload, kind }: { game: GameDetail; reload: () =
   const matches = game.matches ?? [];
   const [changing, setChanging] = useState(false);
   // matchups can be changed until anything has started
-  const untouched = matches.length > 0 && matches.length === 2 && matches.every((m) => m.status === "pending" && !(m.rounds?.length) && !(m.pitches?.length));
+  const untouched = matches.length > 0 && matches.length === 2 && matches.every((m) => m.status === "pending" && !(m.turns?.length) && !(m.pitches?.length));
 
   async function create(pairs: [number, number][]) {
     if (await call(`/admin/games/${game.id}/bracket`, { pairs })) {
@@ -458,7 +459,6 @@ function BracketControl({ game, reload, kind }: { game: GameDetail; reload: () =
   }
   return (
     <>
-      {kind === "meme" && <Countdown presets={[{ label: "Decide 1:00", seconds: 60 }, { label: "Act 1:00", seconds: 60 }]} />}
       {matches.length === 0 || changing ? (
         <PairingPicker onCreate={create} label={matches.length ? "Save matchups" : "Create bracket"} onCancel={changing ? () => setChanging(false) : undefined} />
       ) : (
@@ -468,7 +468,7 @@ function BracketControl({ game, reload, kind }: { game: GameDetail; reload: () =
               Change who plays whom
             </Btn>
           )}
-          {matches.map((m) => (kind === "meme" ? <MemeMatch key={m.id} match={m} reload={reload} /> : <SharkRound key={m.id} match={m} game={game} reload={reload} />))}
+          {matches.map((m) => (kind === "meme" ? <MemeRound key={m.id} match={m} game={game} reload={reload} /> : <SharkRound key={m.id} match={m} game={game} reload={reload} />))}
         </>
       )}
     </>
@@ -516,95 +516,273 @@ function FinishButton({ match, reload, label = "Finish match" }: { match: Match;
   );
 }
 
-function MemeMatch({ match, reload }: { match: Match; reload: () => void }) {
-  const roundsDone = Math.max(0, ...(match.rounds ?? []).map((r) => r.round));
-  const [round, setRound] = useState(Math.min(roundsDone + 1, 12));
-  const teams = [match.teamA, match.teamB].filter((t): t is number => t != null);
-  const existing = (r: number, t: number) => match.rounds?.find((x) => x.round === r && x.teamId === t)?.correct ?? 0;
-  const [scores, setScores] = useState<Record<number, number>>(Object.fromEntries(teams.map((t) => [t, 0])));
-  const [busy, setBusy] = useState(false);
+// When the scores are level the organiser chooses who moves forward
+function TieChoice({ match, reload }: { match: Match; reload: () => void }) {
+  const final = match.stage === "final";
+  return (
+    <div className="space-y-3 rounded-lg border border-warn/40 bg-warn-soft p-3">
+      <div>
+        <div className="font-semibold text-warn">It's a tie</div>
+        <p className="text-sm text-muted">Both teams scored the same. {final ? "Choose the champion." : "Choose which team moves forward."}</p>
+      </div>
+      <div className="grid gap-2">
+        {[match.teamA, match.teamB].map(
+          (t) =>
+            t && (
+              <Btn
+                key={t}
+                variant="secondary"
+                size="lg"
+                onClick={async () => {
+                  if (!confirm(`${teamById(t)?.name} ${final ? "wins" : "moves forward"}?`)) return;
+                  if (await call(`/admin/matches/${match.id}/finish`, { winnerTeam: t })) {
+                    toast(`Team ${teamById(t)?.name} ${final ? "wins" : "moves forward"}`);
+                    reload();
+                  }
+                }}
+              >
+                <TeamIcon teamId={t} size={28} /> {teamById(t)?.name} {final ? "wins" : "moves forward"}
+              </Btn>
+            ),
+        )}
+      </div>
+    </div>
+  );
+}
 
-  useEffect(() => {
-    setScores(Object.fromEntries(teams.map((t) => [t, existing(round, t)])));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [round, match.rounds?.length]);
+// One Meme Charades match. Each team sends players to act a meme (shown on the projector, not here);
+// their own team guesses. The organiser starts the clock and then taps Point or Fail.
+function MemeRound({ match, game, reload }: { match: Match; game: GameDetail; reload: () => void }) {
+  const offset = useMemo(() => (game.serverNow ?? Date.now()) - Date.now(), [game.serverNow]);
+  const cfg = game.meme ?? { act: 60, perTeam: 5, count: 16 };
+  const turns = [...(match.turns ?? [])].sort((a, b) => a.ord - b.ord);
+  const active = turns.find((t) => t.phase !== "done");
+  const done = match.status === "done";
+  const allDone = turns.length > 0 && !active;
+  // memes already used anywhere in this game, so organisers can avoid repeats
+  const used = new Set((game.matches ?? []).flatMap((m) => m.turns ?? []).filter((t) => t.phase !== "idle" && t.meme).map((t) => String(t.meme)));
+  const [choosing, setChoosing] = useState(false);
 
-  async function save() {
-    setBusy(true);
-    if (await call(`/admin/matches/${match.id}/rounds`, { round, scores })) {
-      toast(`Round ${round} saved`);
+  async function start(firstTeam: number) {
+    if (await call(`/admin/matches/${match.id}/start-round`, { firstTeam })) {
+      setChoosing(false);
+      toast(`${teamById(firstTeam)?.name} goes first`);
       reload();
-      if (round === roundsDone + 1) setRound(Math.min(round + 1, 12));
     }
-    setBusy(false);
   }
 
-  const done = match.status === "done";
   return (
     <Card className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="font-semibold">{stageLabel(match.stage)}</h2>
         <StatusPill status={done ? "closed" : match.status === "live" ? "live" : "upcoming"} />
       </div>
-      <div className="grid grid-cols-2 gap-2 text-center">
-        {teams.map((t) => (
-          <div key={t} className={`rounded-lg border p-3 ${match.winnerTeam === t ? "border-accent bg-accent-soft" : "border-line bg-sunken"}`}>
-            <TeamName teamId={t} size={22} className="justify-center text-sm font-semibold" />
-            <div className="text-4xl font-semibold tabular-nums tracking-tight">{match.totals?.[t] ?? 0}</div>
-          </div>
-        ))}
-      </div>
 
-      {!done && (
+      {turns.length === 0 ? (
         <>
-          <div className="flex items-center justify-between rounded-lg bg-sunken p-1.5">
-            <Btn variant="ghost" size="sm" onClick={() => setRound(Math.max(1, round - 1))} aria-label="Previous round">
-              ‹
-            </Btn>
-            <span className="font-semibold">
-              Round {round}
-              {round > 5 && <span className="ml-1.5 text-xs font-semibold text-warn">Sudden death</span>}
-            </span>
-            <Btn variant="ghost" size="sm" onClick={() => setRound(Math.min(12, round + 1))} aria-label="Next round">
-              ›
-            </Btn>
+          <div className="flex items-center justify-center gap-4 py-1">
+            <TeamName teamId={match.teamA} size={32} className="font-semibold" />
+            <span className="text-sm text-subtle">vs</span>
+            <TeamName teamId={match.teamB} size={32} className="font-semibold" />
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            {teams.map((t) => (
-              <div key={t} className="text-center">
-                <div className="mb-2 text-sm font-medium text-muted">{teamById(t)?.name} correct guesses</div>
-                <div className="flex items-center justify-center gap-2">
-                  <button
-                    className="flex h-12 w-12 items-center justify-center rounded-lg border border-line bg-surface transition active:bg-sunken"
-                    aria-label={`Fewer for ${teamById(t)?.name}`}
-                    onClick={() => setScores({ ...scores, [t]: Math.max(0, scores[t] - 1) })}
-                  >
-                    <Minus size={20} />
-                  </button>
-                  <span className="w-10 text-3xl font-semibold tabular-nums">{scores[t]}</span>
-                  <button
-                    className="flex h-12 w-12 items-center justify-center rounded-lg bg-accent text-accent-fg transition active:brightness-90"
-                    aria-label={`More for ${teamById(t)?.name}`}
-                    onClick={() => setScores({ ...scores, [t]: scores[t] + 1 })}
-                  >
-                    <Plus size={20} />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <Btn full busy={busy} onClick={save}>
-            Save round {round}
+          <p className="text-center text-sm text-muted">
+            Each team gets {cfg.perTeam} turns, taken one after the other ({cfg.perTeam * 2} turns in all).
+          </p>
+          <Btn full size="lg" onClick={() => setChoosing(true)}>
+            Start {stageLabel(match.stage).toLowerCase()}
           </Btn>
+          {choosing && (
+            <Modal title="Which team goes first?" onClose={() => setChoosing(false)}>
+              <p className="mb-4 text-sm text-muted">The teams then take turns acting.</p>
+              <div className="grid gap-2">
+                {[match.teamA, match.teamB].map(
+                  (t) =>
+                    t && (
+                      <Btn key={t} variant="secondary" size="lg" onClick={() => start(t)}>
+                        <TeamIcon teamId={t} size={28} /> {teamById(t)?.name} goes first
+                      </Btn>
+                    ),
+                )}
+              </div>
+            </Modal>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 text-center">
+            {[match.teamA, match.teamB].map(
+              (t) =>
+                t && (
+                  <div key={t} className={`rounded-lg border p-3 ${match.winnerTeam === t ? "border-accent bg-accent-soft" : "border-line bg-sunken"}`}>
+                    <TeamName teamId={t} size={26} className="justify-center text-sm font-semibold" />
+                    <div className="text-4xl font-semibold tabular-nums tracking-tight">{match.totals?.[t] ?? 0}</div>
+                  </div>
+                ),
+            )}
+          </div>
+          <TurnTracker teamA={match.teamA} teamB={match.teamB} turns={turns} totals={match.totals ?? {}} />
+          {active && <TurnPanel key={active.id} turn={active} total={turns.length} cfg={cfg} used={used} offset={offset} matchDone={done} reload={reload} />}
+          {allDone && done && match.winnerTeam && (
+            <div className="flex items-center gap-3 rounded-lg bg-accent-soft p-3">
+              <TeamIcon teamId={match.winnerTeam} size={36} />
+              <div className="font-semibold">
+                Team {teamById(match.winnerTeam)?.name} wins
+                <span className="block text-sm font-normal text-muted">{match.stage === "final" ? "Meme Charades champions" : "and moves to the final"}</span>
+              </div>
+            </div>
+          )}
+          {allDone && !done && <TieChoice match={match} reload={reload} />}
         </>
       )}
-      {match.rounds && match.rounds.length > 0 && (
-        <p className="text-center text-xs text-subtle">
-          Saved: {[...new Set(match.rounds.map((r) => r.round))].map((n) => `R${n} ${teams.map((t) => existing(n, t)).join("–")}`).join("  ·  ")}
-        </p>
-      )}
-      <FinishButton match={match} reload={reload} />
     </Card>
+  );
+}
+
+function TurnPanel({
+  turn,
+  total,
+  cfg,
+  used,
+  offset,
+  matchDone,
+  reload,
+}: {
+  turn: MemeTurn;
+  total: number;
+  cfg: { act: number; perTeam: number; count: number };
+  used: Set<string>;
+  offset: number;
+  matchDone: boolean;
+  reload: () => void;
+}) {
+  const now = useClock(offset);
+  const [meme, setMeme] = useState("");
+  const [players, setPlayers] = useState<Person[]>([]);
+  const [picking, setPicking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const acting = turn.phase === "acting";
+
+  async function startTurn() {
+    setBusy(true);
+    if (await call(`/admin/meme-turns/${turn.id}/start`, { meme, playerIds: players.map((p) => p.id) })) reload();
+    setBusy(false);
+  }
+
+  async function result(r: "point" | "fail") {
+    setBusy(true);
+    try {
+      const x = await api<{ winner: number | null; tie: boolean }>(`/admin/meme-turns/${turn.id}/result`, { body: { result: r } });
+      toast(r === "point" ? "Point!" : "No point");
+      if (x.winner) toast(`Team ${teamById(x.winner)?.name} wins the round`);
+      reload();
+    } catch (e) {
+      toastError(e);
+    }
+    setBusy(false);
+  }
+
+  async function restart() {
+    if (!confirm("Start this turn over? Its result is cleared.")) return;
+    if (await call(`/admin/meme-turns/${turn.id}/reset`)) reload();
+  }
+
+  return (
+    <div className="space-y-4 rounded-xl border border-accent bg-surface p-3 ring-1 ring-accent/30">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <TeamName teamId={turn.teamId} size={34} className="text-lg font-semibold" />
+          <div className="mt-0.5 text-xs text-muted">
+            Turn {turn.ord} of {total}
+          </div>
+        </div>
+        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${acting ? "bg-accent-soft text-accent" : "bg-sunken text-muted"}`}>
+          {acting && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
+          {acting ? "Acting" : "Up next"}
+        </span>
+      </div>
+
+      {!acting ? (
+        <>
+          <div>
+            <div className="mb-1.5 text-sm font-medium text-muted">Meme number (optional, only you can see this)</div>
+            <div className="flex flex-wrap gap-1.5">
+              {Array.from({ length: cfg.count }, (_, i) => String(i + 1)).map((n) => (
+                <button
+                  key={n}
+                  aria-pressed={meme === n}
+                  onClick={() => setMeme(meme === n ? "" : n)}
+                  className={`h-9 min-w-9 rounded-lg border px-2 text-sm font-semibold tabular-nums transition ${
+                    meme === n ? "border-accent bg-accent text-accent-fg" : used.has(n) ? "border-dashed border-line bg-sunken text-subtle line-through" : "border-line bg-surface hover:bg-sunken"
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            {used.size > 0 && <p className="mt-1.5 text-xs text-subtle">Crossed-out numbers were used already.</p>}
+          </div>
+
+          <div>
+            <div className="mb-1.5 text-sm font-medium text-muted">Who is acting? (optional, shown to everyone)</div>
+            <div className="flex flex-wrap items-center gap-2">
+              {players.map((p) => (
+                <span key={p.id} className="flex items-center gap-1 rounded-full bg-sunken py-1 pl-3 pr-1 text-sm font-medium">
+                  {p.name}
+                  <button className="rounded-full p-1 text-subtle hover:text-fg" aria-label={`Remove ${p.name}`} onClick={() => setPlayers(players.filter((x) => x.id !== p.id))}>
+                    <X size={14} />
+                  </button>
+                </span>
+              ))}
+              {players.length < 3 && (
+                <Btn variant="secondary" size="sm" onClick={() => setPicking(true)}>
+                  <ScanLine size={16} /> Add players
+                </Btn>
+              )}
+            </div>
+            {picking && (
+              <PersonPickerModal
+                title="Who is acting?"
+                multi
+                onPick={(p) => setPlayers((list) => (list.length >= 3 || list.some((x) => x.id === p.id) ? list : [...list, p]))}
+                onClose={() => setPicking(false)}
+              />
+            )}
+          </div>
+
+          <Btn full size="lg" busy={busy} onClick={startTurn}>
+            <Play size={16} /> Start acting ({mmss(cfg.act)})
+          </Btn>
+        </>
+      ) : (
+        <>
+          <div className="rounded-lg bg-sunken py-3">
+            <ActTimer endsAt={turn.phaseEndsAt} now={now} active />
+          </div>
+          {(turn.meme || turn.players.length > 0) && (
+            <p className="text-center text-sm text-muted">
+              {turn.meme ? <b className="text-fg">Meme {turn.meme}</b> : null}
+              {turn.meme && turn.players.length > 0 ? " · " : ""}
+              {turn.players.map((p) => p.name).join(", ")}
+            </p>
+          )}
+          <p className="text-center text-sm font-medium text-muted">Did their team guess it?</p>
+          <div className="grid grid-cols-2 gap-3">
+            <Btn size="lg" busy={busy} onClick={() => result("point")} className="!min-h-16 text-lg">
+              <Check size={22} strokeWidth={3} /> Point
+            </Btn>
+            <Btn size="lg" variant="danger" busy={busy} onClick={() => result("fail")} className="!min-h-16 text-lg">
+              <X size={22} strokeWidth={3} /> Fail
+            </Btn>
+          </div>
+        </>
+      )}
+
+      {acting && !matchDone && (
+        <button className="text-sm font-semibold text-accent" onClick={restart}>
+          Restart this turn
+        </button>
+      )}
+    </div>
   );
 }
 

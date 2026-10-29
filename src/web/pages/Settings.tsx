@@ -19,6 +19,9 @@ const POINT_FIELDS: [string, string][] = [
   ["shark_prep_seconds", "Shark Tank: preparation time (seconds)"],
   ["shark_pitch_seconds", "Shark Tank: pitch time (seconds)"],
   ["shark_vote_seconds", "Shark Tank: voting time (seconds)"],
+  ["meme_act_seconds", "Meme Charades: acting time per turn (seconds)"],
+  ["meme_turns_per_team", "Meme Charades: turns per team in a match"],
+  ["meme_count", "Meme Charades: how many memes you have (numbered 1 to this)"],
 ];
 
 export function Settings() {

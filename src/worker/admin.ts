@@ -15,7 +15,7 @@ import {
   type User,
 } from "./lib";
 import { createUser, newLoginLink } from "./users";
-import { buildGameDetail, pitchTally, sharkTimers } from "./games";
+import { buildGameDetail, memeConfig, pitchTally, sharkTimers } from "./games";
 import { notifyNewPlayers, notifyRemoved } from "./notify";
 
 export const adminRoutes = new Hono<AppEnv>();
@@ -465,7 +465,7 @@ adminRoutes.post("/games/:id/bracket", async (c) => {
   // An existing bracket can be re-drawn only while nothing has started
   const started = await c.env.DB.prepare(
     `SELECT 1 FROM matches m WHERE m.game_id = ? AND (m.status != 'pending' OR m.stage = 'final'
-       OR EXISTS (SELECT 1 FROM meme_rounds r WHERE r.match_id = m.id) OR EXISTS (SELECT 1 FROM pitches p WHERE p.match_id = m.id)) LIMIT 1`,
+       OR EXISTS (SELECT 1 FROM meme_turns r WHERE r.match_id = m.id) OR EXISTS (SELECT 1 FROM pitches p WHERE p.match_id = m.id)) LIMIT 1`,
   )
     .bind(game.id)
     .first();
@@ -483,7 +483,7 @@ adminRoutes.post("/games/:id/bracket", async (c) => {
 adminRoutes.post("/games/:id/bracket/reset", async (c) => {
   requireAdmin(c);
   const game = await bracketGame(c, Number(c.req.param("id")));
-  // foreign keys cascade to meme_rounds, pitches and pitch_votes
+  // foreign keys cascade to meme_turns, pitches and pitch_votes
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE team_points SET voided_at = ? WHERE game_id = ? AND voided_at IS NULL").bind(now(), game.id),
     c.env.DB.prepare("DELETE FROM matches WHERE game_id = ?").bind(game.id),
@@ -519,33 +519,6 @@ adminRoutes.post("/matches/:id/status", async (c) => {
   if (status !== "pending" && status !== "live") throw new HttpError(400, "Bad status");
   if (m.status === "done") throw new HttpError(409, "Match is finished");
   await c.env.DB.prepare("UPDATE matches SET status = ? WHERE id = ?").bind(status, m.id).run();
-  return c.json({ ok: true });
-});
-
-adminRoutes.post("/matches/:id/rounds", async (c) => {
-  const m = await getMatch(c, Number(c.req.param("id")));
-  if (m.type !== "meme") throw new HttpError(400, "Only Meme Charades has rounds");
-  if (m.status === "done") throw new HttpError(409, "Match is finished. Reset the bracket to change it.");
-  const body = await c.req.json<{ round?: number; scores?: Record<string, number> }>();
-  const round = Number(body.round);
-  if (!Number.isInteger(round) || round < 1 || round > 12) throw new HttpError(400, "Bad round number");
-  const stmts = [];
-  for (const teamId of [m.team_a, m.team_b]) {
-    if (teamId == null) continue;
-    const raw = body.scores?.[String(teamId)];
-    if (raw === undefined) continue;
-    const n = Number(raw);
-    if (!Number.isInteger(n) || n < 0 || n > 99) throw new HttpError(400, "Scores must be whole numbers");
-    stmts.push(
-      c.env.DB.prepare(
-        `INSERT INTO meme_rounds (match_id, round, team_id, correct) VALUES (?, ?, ?, ?)
-         ON CONFLICT (match_id, round, team_id) DO UPDATE SET correct = excluded.correct`,
-      ).bind(m.id, round, teamId, n),
-    );
-  }
-  if (!stmts.length) throw new HttpError(400, "No scores given");
-  if (m.status === "pending") stmts.push(c.env.DB.prepare("UPDATE matches SET status = 'live' WHERE id = ?").bind(m.id));
-  await c.env.DB.batch(stmts);
   return c.json({ ok: true });
 });
 
@@ -591,7 +564,11 @@ adminRoutes.post("/matches/:id/finish", async (c) => {
   let scoreA = 0;
   let scoreB = 0;
   if (m.type === "meme") {
-    const { results } = await c.env.DB.prepare("SELECT team_id, SUM(correct) AS n FROM meme_rounds WHERE match_id = ? GROUP BY team_id").bind(m.id).all<{ team_id: number; n: number }>();
+    const turnCount = await c.env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN phase != 'done' THEN 1 ELSE 0 END) AS open FROM meme_turns WHERE match_id = ?")
+      .bind(m.id)
+      .first<{ total: number; open: number | null }>();
+    if (!turnCount?.total || (turnCount.open ?? 0) > 0) throw new HttpError(409, "Finish all the turns first");
+    const { results } = await c.env.DB.prepare("SELECT team_id, COUNT(*) AS n FROM meme_turns WHERE match_id = ? AND result = 'point' GROUP BY team_id").bind(m.id).all<{ team_id: number; n: number }>();
     scoreA = results.find((r) => r.team_id === m.team_a)?.n ?? 0;
     scoreB = results.find((r) => r.team_id === m.team_b)?.n ?? 0;
   } else {
@@ -605,7 +582,7 @@ adminRoutes.post("/matches/:id/finish", async (c) => {
   let winner: number;
   if (scoreA !== scoreB) winner = scoreA > scoreB ? m.team_a : m.team_b;
   else if (body.winnerTeam === m.team_a || body.winnerTeam === m.team_b) winner = body.winnerTeam;
-  else throw new HttpError(409, m.type === "meme" ? "It is a tie. Add a sudden-death round, or pick the winner." : "It is a tie. Pick the winner.");
+  else throw new HttpError(409, "It is a tie. Pick the winner.");
   const loser = winner === m.team_a ? m.team_b : m.team_a;
   await finishAndAdvance(c, m, winner, loser);
   return c.json({ ok: true, winner });
@@ -622,9 +599,23 @@ const ITEMS = [
 // The organiser picks which team pitches first. Items are drawn for both teams at the same time.
 adminRoutes.post("/matches/:id/start-round", async (c) => {
   const m = await getMatch(c, Number(c.req.param("id")));
-  if (m.type !== "shark" || m.team_b == null) throw new HttpError(400, "Not a Shark Tank round");
+  if ((m.type !== "shark" && m.type !== "meme") || m.team_b == null) throw new HttpError(400, "This game has no rounds to start");
   const { firstTeam } = await c.req.json<{ firstTeam?: number }>();
-  if (firstTeam !== m.team_a && firstTeam !== m.team_b) throw new HttpError(400, "Pick which team pitches first");
+  if (firstTeam !== m.team_a && firstTeam !== m.team_b) throw new HttpError(400, "Pick which team goes first");
+  if (m.type === "meme") {
+    const has = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM meme_turns WHERE match_id = ?").bind(m.id).first<{ n: number }>();
+    if ((has?.n ?? 0) > 0) throw new HttpError(409, "This round has already started");
+    const { perTeam } = await memeConfig(c.env);
+    const other = firstTeam === m.team_a ? m.team_b : m.team_a;
+    const stmts = [];
+    for (let i = 0; i < perTeam * 2; i++) {
+      stmts.push(c.env.DB.prepare("INSERT INTO meme_turns (match_id, ord, team_id) VALUES (?, ?, ?)").bind(m.id, i + 1, i % 2 === 0 ? firstTeam : other));
+    }
+    stmts.push(c.env.DB.prepare("UPDATE matches SET status = 'live' WHERE id = ?").bind(m.id));
+    await c.env.DB.batch(stmts);
+    await audit(c.env, me(c).id, "meme.start_round", { matchId: m.id, firstTeam, turns: perTeam * 2 });
+    return c.json({ ok: true });
+  }
   const existing = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM pitches WHERE match_id = ?").bind(m.id).first<{ n: number }>();
   if ((existing?.n ?? 0) > 0) throw new HttpError(409, "This round has already started");
   const second = firstTeam === m.team_a ? m.team_b : m.team_a;
@@ -738,6 +729,90 @@ adminRoutes.post("/pitches/:id/close", async (c) => {
     }
   }
   return c.json({ ok: true, ...tally, winner, tie });
+});
+
+// ---------- Meme Charades: turn by turn ----------
+// Each team sends players to act a meme (shown on the projector, not in the app). Their own team guesses.
+// The organiser starts the clock, then marks the turn as a point or a fail.
+
+interface TurnRow {
+  id: number;
+  match_id: number;
+  ord: number;
+  team_id: number;
+  phase: string;
+  match_status: string;
+}
+
+async function getTurn(c: Ctx, id: number) {
+  const row = await c.env.DB.prepare(
+    `SELECT t.id, t.match_id, t.ord, t.team_id, t.phase, m.status AS match_status
+       FROM meme_turns t JOIN matches m ON m.id = t.match_id WHERE t.id = ?`,
+  )
+    .bind(id)
+    .first<TurnRow>();
+  if (!row) throw new HttpError(404, "No such turn");
+  return row;
+}
+
+adminRoutes.post("/meme-turns/:id/start", async (c) => {
+  const t = await getTurn(c, Number(c.req.param("id")));
+  if (t.match_status === "done") throw new HttpError(409, "This round is finished");
+  if (t.phase !== "idle") throw new HttpError(409, "This turn has already started");
+  const earlier = await c.env.DB.prepare("SELECT 1 FROM meme_turns WHERE match_id = ? AND ord < ? AND phase != 'done'").bind(t.match_id, t.ord).first();
+  if (earlier) throw new HttpError(409, "Finish the previous turn first");
+  const body = await c.req.json<{ meme?: string; playerIds?: number[] }>().catch(() => ({} as { meme?: string; playerIds?: number[] }));
+  const meme = String(body.meme ?? "").trim().slice(0, 40) || null;
+  // names come from the database, not from the phone
+  let players: { id: number; name: string }[] = [];
+  const ids = [...new Set((body.playerIds ?? []).map(Number))].filter((n) => Number.isInteger(n)).slice(0, 6);
+  if (ids.length) {
+    const { results } = await c.env.DB.prepare(`SELECT id, display_name AS name FROM users WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: number; name: string }>();
+    players = results;
+  }
+  const { act } = await memeConfig(c.env);
+  const endsAt = now() + act * 1000;
+  await c.env.DB.prepare("UPDATE meme_turns SET phase = 'acting', phase_ends_at = ?, meme = ?, players = ? WHERE id = ?")
+    .bind(endsAt, meme, players.length ? JSON.stringify(players) : null, t.id)
+    .run();
+  await audit(c.env, me(c).id, "meme.start_turn", { turnId: t.id, meme, players: players.length });
+  return c.json({ ok: true, endsAt });
+});
+
+adminRoutes.post("/meme-turns/:id/result", async (c) => {
+  const t = await getTurn(c, Number(c.req.param("id")));
+  const { result } = await c.req.json<{ result?: string }>();
+  if (result !== "point" && result !== "fail") throw new HttpError(400, "Choose point or fail");
+  if (t.phase !== "acting") throw new HttpError(409, "Start the turn first");
+  await c.env.DB.prepare("UPDATE meme_turns SET phase = 'done', phase_ends_at = NULL, result = ? WHERE id = ?").bind(result, t.id).run();
+  await audit(c.env, me(c).id, "meme.result", { turnId: t.id, result });
+
+  // after the last turn the higher score moves on by itself; level scores wait for the organiser
+  let winner: number | null = null;
+  let tie = false;
+  const { results: all } = await c.env.DB.prepare("SELECT team_id, phase, result FROM meme_turns WHERE match_id = ?").bind(t.match_id).all<{ team_id: number; phase: string; result: string | null }>();
+  if (all.every((x) => x.phase === "done")) {
+    const m = await getMatch(c, t.match_id);
+    const a = all.filter((x) => x.team_id === m.team_a && x.result === "point").length;
+    const b = all.filter((x) => x.team_id === m.team_b && x.result === "point").length;
+    if (a === b) tie = true;
+    else {
+      winner = a > b ? m.team_a : (m.team_b as number);
+      await finishAndAdvance(c, m, winner, winner === m.team_a ? m.team_b : m.team_a);
+    }
+  }
+  return c.json({ ok: true, winner, tie });
+});
+
+// Take this turn back to "waiting" (for a mistake)
+adminRoutes.post("/meme-turns/:id/reset", async (c) => {
+  const t = await getTurn(c, Number(c.req.param("id")));
+  if (t.match_status === "done") throw new HttpError(409, "This round is finished. An admin can reset the bracket.");
+  const later = await c.env.DB.prepare("SELECT 1 FROM meme_turns WHERE match_id = ? AND ord > ? AND phase != 'idle'").bind(t.match_id, t.ord).first();
+  if (later) throw new HttpError(409, "Restart the later turns first");
+  await c.env.DB.prepare("UPDATE meme_turns SET phase = 'idle', phase_ends_at = NULL, result = NULL, meme = NULL, players = NULL WHERE id = ?").bind(t.id).run();
+  await audit(c.env, me(c).id, "meme.reset_turn", { turnId: t.id });
+  return c.json({ ok: true });
 });
 
 // ---------- Manual team points and corrections ----------

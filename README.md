@@ -36,6 +36,17 @@ The app follows the phone's setting by default. The sun/moon button in the top b
 - Organisers then record each finisher's **time in seconds**. The fastest time wins, the top three show on a podium, and team points follow the times (winner's team +10, each other finisher's team +1 by default).
 - Alerts show as a bell in the app and as a phone notification **while the app is open** (including in the background). A phone where the browser is completely closed will not get them, because that needs a push service, which is a bigger add-on.
 
+### Meme Charades, turn by turn
+
+The memes themselves are shown on the projector, not in the app. The app runs the turns and the score.
+
+1. On the Meme Charades control screen, pick who plays whom (two matches), then start a match and choose **which team goes first**.
+2. Each team gets 5 turns (10 in all), one team after the other. For each turn the organiser can pick a **meme number** (numbers already used are crossed out) and add the **acting players** (up to 3). The meme number is only for organisers and is never sent to players' phones.
+3. Press **Start acting** for a 1 minute clock. When the turn ends, tap **Point** (their team guessed it) or **Fail**.
+4. After the last turn the higher score wins and moves on automatically. If the scores are level, the organiser chooses who moves forward. The final works the same way.
+
+Players see whose turn it is, who is acting, the clock, the live score and whether the last turn scored. The acting time, turns per team and number of memes are in **Settings**.
+
 ### Shark Tank, turn by turn
 
 1. On the Shark Tank control screen, pick who plays whom (two rounds). Matchups can be changed until a round starts.

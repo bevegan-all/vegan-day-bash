@@ -667,6 +667,164 @@ ok(forged.status === 404, "forged QR rejected");
   ok(ad.rounds[0].phase === "idle" && ad.rounds[0].votes === 0 && ad.rounds[0].results.length === 0, "round 1 is back to the start with no votes or results");
 }
 
+// ---- Hook Step Challenge: rounds of 10 steps marked pass or fail, a cap on players, a final for ties
+{
+  const hk = g("hook-step-challenge");
+  const mkO = async (name) => {
+    const made = await admin.req("/admin/users", { name, role: "organiser" });
+    const cl = new Client();
+    await cl.req("/auth/login", { username: made.j.username, password: made.j.password });
+    return cl;
+  };
+  const [oA, oB, oC] = [await mkO("Hook Organiser A"), await mkO("Hook Organiser B"), await mkO("Hook Organiser C")];
+  ok(hk.type === "hookstep" && hk.kind === "individual", "Hook Step Challenge is an individual game of its own type");
+  const hd = async (who = admin) => (await who.req(`/admin/games/${hk.id}`)).j.hookstep;
+  const rid = async (ord) => (await hd()).rounds.find((x) => x.ord === ord).id;
+  const play = async (who, roundId, user, pattern) => {
+    const m = await who.req(`/admin/hs-rounds/${roundId}/monitor`, { userId: user.id });
+    if (m.status !== 200) return m;
+    let last;
+    for (let i = 0; i < pattern.length; i++) last = await who.req(`/admin/hs-rounds/${roundId}/step`, { userId: user.id, pass: pattern[i] === "P", index: i });
+    return last;
+  };
+  const P = "PPPPPPPPPP";
+  const ovBefore = Object.fromEntries((await admin.req("/leaderboard/individual?full=1")).j.top.map((x) => [x.userId, x.value]));
+  const pat = (n) => P.slice(0, n) + "F".repeat(10 - n); // n correct steps
+
+  r = await admin.req(`/admin/games/${hk.id}/hookstep/players`, { userIds: [users[0].id] });
+  ok(r.status === 409, "players can't be added before the rounds are set up");
+  r = await users[0].c.req(`/admin/games/${hk.id}/hookstep/setup`, { rounds: 3, cap: 6 });
+  ok(r.status === 403, "a player can't set the game up");
+  r = await admin.req(`/admin/games/${hk.id}/hookstep/setup`, { rounds: 0, cap: 6 });
+  ok(r.status === 400, "0 rounds is rejected");
+  r = await admin.req(`/admin/games/${hk.id}/hookstep/setup`, { rounds: 3, cap: 1 });
+  ok(r.status === 400, "fewer than 2 players is rejected");
+  r = await admin.req(`/admin/games/${hk.id}/hookstep/setup`, { rounds: 3, cap: 6 });
+  ok(r.status === 200, "organiser chooses 3 rounds and up to 6 players");
+  let h = await hd();
+  ok(h.configured && h.roundsCount === 3 && h.cap === 6 && h.steps === 10 && h.rounds.length === 3 && h.phase === "rounds", "3 rounds are made, 10 steps each");
+
+  // three organisers add players at the same time; the list never goes past the cap
+  const rs = await Promise.all([
+    oA.req(`/admin/games/${hk.id}/hookstep/players`, { userIds: [0, 1, 2, 3].map((i) => users[i].id) }),
+    oB.req(`/admin/games/${hk.id}/hookstep/players`, { userIds: [2, 3, 4, 5, 6].map((i) => users[i].id) }),
+    oC.req(`/admin/games/${hk.id}/hookstep/players`, { userIds: [4, 5, 6, 7, 8, 9].map((i) => users[i].id) }),
+  ]);
+  ok(rs.every((x) => x.status === 200), "three organisers add players together");
+  h = await hd();
+  ok(h.roster.length === 6, "the list stops at the cap of 6 even with three organisers adding at once (" + h.roster.length + ")");
+  ok(rs.some((x) => x.j.full), "an organiser is told when the list is full");
+  r = await admin.req(`/admin/games/${hk.id}/hookstep/players`, { userIds: [users[11].id] });
+  ok(r.status === 200 && r.j.added === 0 && r.j.full === true && (await hd()).roster.length === 6, "nobody can be added past the cap");
+  r = await admin.req(`/admin/games/${hk.id}/hookstep/setup`, { rounds: 3, cap: 4 });
+  ok(r.status === 409, "the cap can't go below the players already on the list");
+  const play6 = (await hd()).roster.map((p) => users.find((u) => u.id === p.userId));
+  const [p1, p2, p3, p4, p5, p6] = play6;
+  let pulse = (await p1.c.req("/pulse")).j;
+  ok(pulse.notifications.some((n) => n.title.includes("You're in")), "added players get an alert");
+
+  // round 1
+  const r1 = await rid(1), r2 = await rid(2), r3 = await rid(3);
+  r = await admin.req(`/admin/hs-rounds/${r2}/status`, { status: "live" });
+  ok(r.status === 409, "round 2 can't start before round 1 is done");
+  r = await admin.req(`/admin/hs-rounds/${r1}/monitor`, { userId: p1.id });
+  ok(r.status === 409, "monitoring needs the round to be started");
+  r = await admin.req(`/admin/hs-rounds/${r1}/status`, { status: "live" });
+  ok(r.status === 200, "round 1 starts");
+  r = await admin.req(`/admin/hs-rounds/${r3}/status`, { status: "live" });
+  ok(r.status === 409, "only one round runs at a time");
+  r = await admin.req(`/admin/hs-rounds/${r1}/monitor`, { userId: users[11].id });
+  ok(r.status === 409, "someone who is not on the list can't be monitored");
+
+  // two organisers each monitor a different player at the same time
+  const both = await Promise.all([play(oA, r1, p1, P), play(oB, r1, p2, pat(7))]);
+  ok(both[0].j.turn.status === "done" && both[0].j.turn.score === 10, "organiser A: 10 passes make a score of 10");
+  ok(both[1].j.turn.status === "done" && both[1].j.turn.score === 7, "organiser B, at the same time: 7 passes and 3 fails make 7");
+  r = await oB.req(`/admin/hs-rounds/${r1}/step`, { userId: p1.id, pass: true, index: 9 });
+  ok(r.j.recorded === false && r.j.turn.steps.length === 10, "a finished turn takes no more steps");
+
+  // one player, two organisers
+  r = await oA.req(`/admin/hs-rounds/${r1}/monitor`, { userId: p3.id });
+  ok(r.status === 200 && r.j.turn.status === "live", "an organiser starts monitoring a player");
+  r = await oB.req(`/admin/hs-rounds/${r1}/monitor`, { userId: p3.id });
+  ok(r.status === 409 && /already monitoring/.test(r.j.error ?? ""), "another organiser is told the player is taken");
+  const taps = await Promise.all([oA.req(`/admin/hs-rounds/${r1}/step`, { userId: p3.id, pass: true, index: 0 }), oA.req(`/admin/hs-rounds/${r1}/step`, { userId: p3.id, pass: true, index: 0 }), oB.req(`/admin/hs-rounds/${r1}/step`, { userId: p3.id, pass: false, index: 0 })]);
+  ok(taps.filter((x) => x.j.recorded).length === 1, "three taps for the same step record exactly one");
+  const st = (await hd()).rounds[0].turns.find((x) => x.userId === p3.id);
+  ok(st.steps.length === 1 && st.status === "live", "the player is on step 2");
+  r = await oA.req(`/admin/hs-rounds/${r1}/undo`, { userId: p3.id, index: 1 });
+  ok(r.j.turn.steps === "", "the last step can be taken back");
+  r = await admin.req(`/admin/hs-rounds/${r1}/status`, { status: "done" });
+  ok(r.status === 409, "a round can't finish while a player is mid-turn");
+  r = await oB.req(`/admin/hs-rounds/${r1}/monitor`, { userId: p3.id, takeover: true });
+  ok(r.status === 200, "another organiser can take a player over");
+  for (let i = 0; i < 10; i++) await oB.req(`/admin/hs-rounds/${r1}/step`, { userId: p3.id, pass: true, index: i });
+  await Promise.all([play(oA, r1, p4, pat(5)), play(oB, r1, p5, pat(9)), play(oC, r1, p6, P)]);
+  r = await admin.req(`/admin/hs-rounds/${r1}/status`, { status: "done" });
+  ok(r.status === 200, "round 1 finishes once every turn is done");
+
+  // rounds 2 and 3: p1 and p6 stay perfect
+  const scores2 = [10, 10, 9, 10, 10, 10], scores3 = [10, 10, 9, 10, 10, 10];
+  for (const [rnd, sc] of [[r2, scores2], [r3, scores3]]) {
+    await admin.req(`/admin/hs-rounds/${rnd}/status`, { status: "live" });
+    await Promise.all(play6.map((u, i) => play([oA, oB, oC][i % 3], rnd, u, pat(sc[i]))));
+    r = await admin.req(`/admin/hs-rounds/${rnd}/status`, { status: "done" });
+    ok(r.status === 200, "round finished");
+  }
+  h = await hd();
+  const tot = (u) => h.standings.find((s) => s.userId === u.id).total;
+  ok(tot(p1) === 30 && tot(p2) === 7 + 10 + 10 && tot(p3) === 10 + 9 + 9 && tot(p5) === 29 && tot(p6) === 30, "totals add up over the rounds");
+  ok(h.leaders.length === 2 && h.leaders.includes(p1.id) && h.leaders.includes(p6.id), "two players are level on a perfect 30");
+  ok(h.hasFinal && h.rounds.length === 4 && h.rounds[3].kind === "final" && h.rounds[3].turns.length === 2, "a final is made for the players who are level");
+  ok(h.phase === "final" && h.winners.length === 0, "nobody has won yet");
+  pulse = (await p6.c.req("/pulse")).j;
+  ok(pulse.notifications.some((n) => n.title.includes("made the final")), "finalists get an alert");
+  const fin = h.rounds[3].id;
+  r = await admin.req(`/admin/hs-rounds/${fin}/monitor`, { userId: p4.id });
+  ok(r.status === 409, "only the players who are level are in the final");
+
+  // reopening round 3 takes the final away until it is finished again
+  r = await admin.req(`/admin/hs-rounds/${r3}/status`, { status: "live" });
+  ok(r.status === 200 && (await hd()).rounds.length === 3, "reopening the last round removes the unplayed final");
+  r = await admin.req(`/admin/hs-rounds/${r3}/status`, { status: "done" });
+  ok((await hd()).rounds.length === 4, "finishing it again brings the final back");
+
+  // the final: a tie for the win means everyone tied wins
+  const fin2 = (await hd()).rounds[3].id;
+  r = await admin.req(`/admin/hs-rounds/${fin2}/status`, { status: "done" });
+  ok(r.status === 409, "the final can't finish before the finalists have played");
+  await admin.req(`/admin/hs-rounds/${fin2}/status`, { status: "live" });
+  await Promise.all([play(oA, fin2, p1, P), play(oB, fin2, p6, P)]);
+  r = await oA.req(`/admin/hs-rounds/${r3}/status`, { status: "live" });
+  ok(r.status === 409, "a round can't be reopened once the final has started");
+  r = await admin.req(`/admin/hs-rounds/${fin2}/status`, { status: "done" });
+  ok(r.status === 200, "the final finishes");
+  h = await hd();
+  ok(h.phase === "done" && h.winners.length === 2 && h.winners.includes(p1.id) && h.winners.includes(p6.id), "both players who tied in the final win");
+  const ranks = Object.fromEntries(h.standings.map((s) => [s.userId, s.rank]));
+  ok(ranks[p1.id] === 1 && ranks[p6.id] === 1 && ranks[p5.id] === 3, "tied winners share 1st and the next player is 3rd");
+  const lb = (await admin.req(`/leaderboard/individual?game=${hk.id}`)).j;
+  ok(lb.top.filter((x) => x.rank === 1).length === 2, "the game's leaderboard shows both winners in 1st");
+  const ov = (await admin.req("/leaderboard/individual?full=1")).j.top;
+  const ovOf = (u) => ov.find((x) => x.userId === u.id)?.value ?? 0;
+  ok(ovOf(p1) - ovBefore[p1.id] === 10 && ovOf(p6) - ovBefore[p6.id] === 10, "both winners get the full 1st place points (10 each)");
+  ok(ovOf(p5) - ovBefore[p5.id] === 6, "the next player is 3rd and gets the 3rd place points");
+
+  // a lone leader wins straight away, with no final
+  r = await admin.req(`/admin/games/${hk.id}/hookstep/reset`, {});
+  ok(r.status === 200 && !(await hd()).configured && (await hd()).roster.length === 0, "the game can be started over");
+  await admin.req(`/admin/games/${hk.id}/hookstep/setup`, { rounds: 4, cap: 10 });
+  await admin.req(`/admin/games/${hk.id}/hookstep/players`, { userIds: [0, 1, 2].map((i) => users[i].id) });
+  for (let n = 1; n <= 4; n++) {
+    const id = await rid(n);
+    await admin.req(`/admin/hs-rounds/${id}/status`, { status: "live" });
+    await Promise.all([play(oA, id, users[0], P), play(oB, id, users[1], n === 4 ? pat(9) : P), play(oC, id, users[2], pat(8))]);
+    await admin.req(`/admin/hs-rounds/${id}/status`, { status: "done" });
+  }
+  h = await hd();
+  ok(h.phase === "done" && !h.hasFinal && h.winners.length === 1 && h.winners[0] === users[0].id, "one player ahead after 4 rounds wins with no final");
+}
+
 // ---- one-time sign-in code (moves a sign-in into the installed app)
 const hand = await users[3].c.req("/auth/handoff", {});
 ok(hand.status === 200 && /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(hand.j.code), "signed-in person can get a sign-in code");

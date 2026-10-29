@@ -10,6 +10,7 @@ import { PersonField, PersonPickerModal, type Person } from "../pickers";
 import { ActTimer, TurnTracker } from "../meme";
 import { ActOutControl } from "./ActOutControl";
 import { GreenRedControl } from "./GreenRedControl";
+import { HookStepControl } from "./HookStepControl";
 import { PhaseChip, PhaseSteps, PhaseTimer, useClock } from "../shark";
 import { Btn, Card, Countdown, ErrorBox, IconBtn, Modal, Page, RankBadge, SectionLabel, Spinner, StatusPill, TeamChip, TeamMark, TeamName, toast, toastError } from "../ui";
 
@@ -35,7 +36,7 @@ export function GameControl() {
   const { me } = useAuth();
   const [every, setEvery] = useState(8000);
   const { data, error, loading, reload } = usePoll<GameDetail>(`/admin/games/${id}`, every);
-  const live = data?.type === "meme" || data?.type === "shark" || data?.type === "actout" || data?.type === "greenred";
+  const live = data?.type === "meme" || data?.type === "shark" || data?.type === "actout" || data?.type === "greenred" || data?.type === "hookstep";
   useEffect(() => setEvery(live ? 4000 : 8000), [live]);
 
   async function setStatus(status: string) {
@@ -83,6 +84,7 @@ export function GameControl() {
 
           {data.type === "individual" && <IndividualControl game={data} reload={reload} />}
           {data.type === "greenred" && <GreenRedControl game={data} reload={reload} />}
+          {data.type === "hookstep" && <HookStepControl game={data} reload={reload} />}
           {data.type === "meme" && <BracketControl game={data} reload={reload} kind="meme" />}
           {data.type === "shark" && <BracketControl game={data} reload={reload} kind="shark" />}
           {data.type === "actout" && <ActOutControl game={data} reload={reload} />}

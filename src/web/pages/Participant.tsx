@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import QRCode from "qrcode";
-import { Check, ChevronRight, LogOut, SlidersHorizontal } from "lucide-react";
+import { Check, ChevronRight, Crown, LogOut, SlidersHorizontal } from "lucide-react";
 import { teamById } from "../../shared/teams";
 import { api, fmtTime, toFinishers, usePoll, type Board, type GameDetail, type GameSummary, type TeamRow } from "../api";
 import { isOrganiser, useAuth } from "../auth";
@@ -12,6 +12,7 @@ import { MemeLiveCard } from "../meme";
 import { ActOutLiveCard, ActOutSummary } from "../actout";
 import { AlertsToggle, usePulse } from "../pulse";
 import { InstallCard } from "../install";
+import { StepDots, passes } from "../hookstep";
 import { Avatar, Btn, Card, ErrorBox, Page, RankBadge, SectionLabel, Segmented, Spinner, StatusPill, TeamChip, TeamMark, ThemeSelect } from "../ui";
 
 interface HomeData {
@@ -168,7 +169,11 @@ export function GamesList() {
 export function GameView() {
   const { id } = useParams();
   const { me } = useAuth();
-  const { data, error, loading, reload } = usePoll<GameDetail>(`/games/${id}`, 15000);
+  const [every, setEvery] = useState(15000);
+  const { data, error, loading, reload } = usePoll<GameDetail>(`/games/${id}`, every);
+  // while the Hook Step Challenge is live, steps are marked every few seconds
+  const hookLive = data?.type === "hookstep" && data.status === "live";
+  useEffect(() => setEvery(hookLive ? 6000 : 15000), [hookLive]);
   const { pulse, reload: reloadPulse, offset } = usePulse();
   const turn = pulse?.shark && String(pulse.shark.gameId) === id ? pulse.shark : null;
   const memeTurn = pulse?.meme && String(pulse.meme.gameId) === id ? pulse.meme : null;
@@ -224,6 +229,7 @@ export function GameView() {
             ))}
 
           {data.type === "greenred" && data.greenred && <GreenRedView game={data} />}
+          {data.type === "hookstep" && data.hookstep && <HookStepView game={data} />}
 
           {data.board && data.type === "individual" && (
             <Card>
@@ -238,6 +244,98 @@ export function GameView() {
         </>
       )}
     </Page>
+  );
+}
+
+function HookStepView({ game }: { game: GameDetail }) {
+  const h = game.hookstep!;
+  const { me } = useAuth();
+  if (!h.configured) return <Card className="text-center text-sm text-muted">The organisers will set up the rounds soon. If you're added, you'll get an alert.</Card>;
+  const live = h.rounds.find((r) => r.status === "live");
+  const myTurn = live?.turns.find((t) => t.userId === me?.id);
+  const iWon = h.winners.includes(me?.id ?? -1);
+  const winners = h.standings.filter((s) => s.winner);
+  const regular = h.rounds.filter((r) => r.kind === "round");
+  const max = h.steps * h.roundsCount;
+
+  return (
+    <>
+      <Card className={iWon ? "border-warn bg-warn-soft" : h.mine ? "border-accent bg-accent-soft" : ""}>
+        {iWon ? (
+          <div className="flex items-center gap-3">
+            <Crown size={30} className="text-warn" />
+            <div>
+              <div className="font-semibold">{winners.length > 1 ? "You won, together with the others" : "You won"}</div>
+              <div className="text-sm text-muted">Well done!</div>
+            </div>
+          </div>
+        ) : h.mine ? (
+          <div className="flex items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent text-accent-fg">
+              <Check size={20} strokeWidth={3} />
+            </span>
+            <div>
+              <div className="font-semibold">{h.finalist && h.phase === "final" ? "You're in the final" : "You're in this game"}</div>
+              <div className="text-sm text-muted">Head to the {game.location} when the organisers call you.</div>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-muted">Organisers add the players ({h.roster.length} of {h.cap} places taken). You will get an alert if you're added.</p>
+        )}
+      </Card>
+
+      {myTurn && myTurn.status !== "waiting" && live && (
+        <Card className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold">Your turn, {live.kind === "final" ? "final" : `round ${live.ord}`}</h3>
+            {myTurn.status === "done" && <span className="text-lg font-semibold text-accent">{myTurn.score} of {h.steps}</span>}
+          </div>
+          <StepDots steps={myTurn.steps} total={h.steps} />
+          <p className="text-xs text-subtle">{myTurn.status === "live" ? `Watched by ${myTurn.monitorName ?? "an organiser"}. ${passes(myTurn.steps)} correct so far.` : "Turn finished."}</p>
+        </Card>
+      )}
+
+      {h.phase === "final" && (
+        <Card className="text-sm">
+          <b>{h.leaders.length} players</b> are level at the top and play a final: {h.standings.filter((s) => h.leaders.includes(s.userId)).map((s) => s.name).join(", ")}.
+        </Card>
+      )}
+
+      <Card>
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">Scores</h3>
+          <span className="text-sm text-muted">
+            {h.roundsCount} {h.roundsCount === 1 ? "round" : "rounds"} · {max} steps
+          </span>
+        </div>
+        {h.standings.every((s) => s.rank == null) ? (
+          <p className="text-sm text-muted">No scores yet.</p>
+        ) : (
+          <ul className="divide-y divide-line">
+            {h.standings
+              .filter((s) => s.rank != null)
+              .slice(0, 12)
+              .map((s) => (
+                <li key={s.userId} className="flex items-center gap-2 py-2">
+                  <RankBadge rank={s.rank!} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate font-medium">{s.name}</span>
+                      {s.winner && <Crown size={14} className="shrink-0 text-warn" />}
+                    </div>
+                    <div className="text-xs tabular-nums text-subtle">
+                      {regular.map((r, i) => `R${r.ord} ${s.scores[i] ?? "–"}`).join("  ")}
+                      {s.final != null && `  Final ${s.final}`}
+                    </div>
+                  </div>
+                  <TeamChip teamId={s.teamId} small />
+                  <span className="w-9 text-right text-lg font-semibold tabular-nums">{s.total}</span>
+                </li>
+              ))}
+          </ul>
+        )}
+      </Card>
+    </>
   );
 }
 

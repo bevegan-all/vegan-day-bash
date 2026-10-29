@@ -83,7 +83,7 @@ export interface GameSummary {
   slug: string;
   name: string;
   kind: "team" | "individual";
-  type: "meme" | "greenred" | "shark" | "activity" | "actout" | "individual";
+  type: "meme" | "greenred" | "shark" | "activity" | "actout" | "individual" | "hookstep";
   resultType: string | null;
   description: string;
   status: "draft" | "upcoming" | "live" | "closed";
@@ -121,6 +121,56 @@ export const grLabel = (r: { kind: string; ord: number }, mode: string | null) =
 
 export const toFinishers = (entries: GrEntry[]): Finisher[] =>
   entries.filter((e) => e.seconds != null).map((e) => ({ resultId: 0, userId: e.userId, name: e.name, teamId: e.teamId, seconds: e.seconds as number, rank: e.rank as number }));
+
+export interface HsTurn {
+  userId: number;
+  name: string;
+  teamId: number | null;
+  status: "waiting" | "live" | "done";
+  /** one letter per step so far: P for pass, F for fail */
+  steps: string;
+  score: number | null;
+  monitorId: number | null;
+  monitorName: string | null;
+}
+
+export interface HsRound {
+  id: number;
+  ord: number;
+  kind: "round" | "final";
+  status: "idle" | "live" | "done";
+  turns: HsTurn[];
+}
+
+export interface HsStanding {
+  userId: number;
+  name: string;
+  teamId: number | null;
+  rank: number | null;
+  total: number;
+  scores: (number | null)[];
+  final: number | null;
+  winner: boolean;
+  finalist: boolean;
+}
+
+export interface HookStep {
+  configured: boolean;
+  roundsCount: number;
+  cap: number;
+  steps: number;
+  phase: "setup" | "rounds" | "final" | "done";
+  mine: boolean;
+  finalist: boolean;
+  leaders: number[];
+  winners: number[];
+  hasFinal: boolean;
+  roster: { userId: number; name: string; teamId: number | null }[];
+  rounds: HsRound[];
+  standings: HsStanding[];
+}
+
+export const hsLabel = (r: { kind: string; ord: number }) => (r.kind === "final" ? "Final" : `Round ${r.ord}`);
 
 export interface RosterPlayer {
   userId: number;
@@ -321,6 +371,7 @@ export interface GameDetail extends GameSummary {
   matches?: Match[];
   board?: Board;
   recent?: { id: number; value: number; at: number; name: string; teamId: number | null; matchRef: string | null }[];
+  hookstep?: HookStep | null;
   greenred?: {
     mode: "single" | "multi" | null;
     heats: number;

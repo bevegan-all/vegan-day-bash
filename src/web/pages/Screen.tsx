@@ -6,9 +6,11 @@ import { ActTimer, TurnTracker } from "../meme";
 import { TeamOrder } from "../actout";
 import { PhaseChip, PhaseTimer, useClock } from "../shark";
 import { TeamIcon } from "../art";
+import { StepDots, passes } from "../hookstep";
 import { Podium } from "../components";
 import { CelebrationOverlay, CountUp, ScoreBar, Stage, VoteMeter, useCelebrations, type Celebration, type Step, type StageView } from "../stage";
 import { Logo, RankBadge, StatusPill, TeamName } from "../ui";
+import { hsLabel } from "../api";
 
 interface ScreenData {
   teams: TeamRow[];
@@ -130,6 +132,30 @@ function celebrationsOf(g: GameDetail): Celebration[] {
       rows: r.results.slice(0, 4).map((x) => ({ rank: x.rank, name: teamName(x.teamId), teamId: x.teamId, value: `+${x.points}` })),
     });
   }
+  const hs = g.hookstep;
+  if (hs?.configured) {
+    const lead = hs.standings.filter((s) => hs.leaders.includes(s.userId));
+    if (hs.hasFinal && lead.length > 1) {
+      out.push({
+        id: `hf${g.id}:${hs.leaders.join(",")}`,
+        kicker: `${g.name} · Final`,
+        title: `${lead.length} players are level and go to the final`,
+        sub: `Each has ${lead[0].total} of ${hs.steps * hs.roundsCount}`,
+        rows: lead.slice(0, 5).map((s) => ({ rank: 1, name: s.name, teamId: s.teamId, value: `${s.total}` })),
+      });
+    }
+    const won = hs.standings.filter((s) => s.winner);
+    if (won.length) {
+      out.push({
+        id: `hw${g.id}:${won.map((s) => s.userId).join(",")}`,
+        teamId: won.length === 1 ? won[0].teamId : null,
+        kicker: `${g.name} · ${won.length === 1 ? "Winner" : "Winners"}`,
+        title: won.length === 1 ? `${won[0].name} wins!` : `${won.length} players win together`,
+        sub: won.length === 1 ? `${won[0].total} of ${hs.steps * hs.roundsCount} steps correct` : "Level at the top, so they all win",
+        rows: won.length > 1 ? won.slice(0, 5).map((s) => ({ rank: 1, name: s.name, teamId: s.teamId, value: `${s.final ?? s.total}` })) : undefined,
+      });
+    }
+  }
   const gr = g.greenred;
   if (gr?.mode) {
     for (const r of gr.rounds) {
@@ -162,6 +188,8 @@ function LiveGame({ game }: { game: GameDetail }) {
       return <ActStage game={game} />;
     case "greenred":
       return <RaceStage game={game} />;
+    case "hookstep":
+      return <HookStage game={game} />;
     case "individual":
       return <BoardStage game={game} />;
     default:
@@ -376,6 +404,77 @@ function RaceStage({ game }: { game: GameDetail }) {
         </div>
       )}
       {timed.length === 0 && shown.status !== "live" && shown.entries.length === 0 && <div className="py-2 text-center text-2xl text-muted">The organisers are lining people up.</div>}
+    </div>
+  );
+  return <Stage game={game} view={view} />;
+}
+
+function HookStage({ game }: { game: GameDetail }) {
+  const h = game.hookstep;
+  if (!h?.configured) return <Stage game={game} view={{ kicker: "Individual game", tone: "wait", title: "Hook Step Challenge", sub: "The organisers are setting up" }} />;
+  const rounds = h.rounds;
+  const live = rounds.find((r) => r.status === "live");
+  const lastDone = [...rounds].reverse().find((r) => r.status === "done");
+  const next = rounds.find((r) => r.status === "idle");
+  const winners = h.standings.filter((s) => s.winner);
+  const lead = h.standings.filter((s) => h.leaders.includes(s.userId));
+  const max = h.steps * h.roundsCount;
+  const watching = live?.turns.filter((t) => t.status === "live") ?? [];
+  const finished = live?.turns.filter((t) => t.status === "done") ?? [];
+
+  let view: StageView;
+  if (live) {
+    const total = live.kind === "final" ? lead.length : h.roster.length;
+    view = { kicker: live.kind === "final" ? "Final" : `Round ${live.ord} of ${h.roundsCount}`, tone: "live", title: live.kind === "final" ? "The final is on" : `Round ${live.ord} is on`, sub: `${finished.length} of ${total} done  ·  ${watching.length} being watched now` };
+  } else if (winners.length) {
+    view = { kicker: "Result", tone: "done", title: winners.length === 1 ? `${winners[0].name} wins` : `${winners.length} players win together`, sub: winners.length === 1 ? `${winners[0].total} of ${max} steps correct` : "Level at the top, so everyone level wins" };
+  } else if (h.phase === "final") {
+    view = { kicker: "Final", tone: "vote", title: `${lead.length} players go to the final`, sub: `All level on ${lead[0]?.total} of ${max}` };
+  } else if (lastDone) {
+    view = { kicker: `${hsLabel(lastDone)} complete`, tone: "wait", title: next ? `${hsLabel(next)} is up next` : "All rounds are done", sub: `${h.roster.length} players` };
+  } else {
+    view = { kicker: "Individual game", tone: "wait", title: "Hook Step Challenge starts soon", sub: `${h.roster.length} ${h.roster.length === 1 ? "player" : "players"} ready  ·  ${h.roundsCount} rounds of ${h.steps} steps` };
+  }
+  view.steps = rounds.map((r) => ({ label: hsLabel(r), state: r.status === "done" ? "done" : r.status === "live" ? "live" : "next" }));
+  const ranked = h.standings.filter((s) => s.rank != null).slice(0, 8);
+  view.body = (
+    <div className="space-y-5">
+      {watching.length > 0 && (
+        <div className="grid gap-3">
+          {watching.slice(0, 4).map((t) => (
+            <div key={t.userId} className="rounded-xl border border-accent/60 bg-sunken p-4">
+              <div className="mb-3 flex items-center gap-3">
+                <TeamIcon teamId={t.teamId} size={40} />
+                <span className="flex-1 truncate text-3xl font-semibold">{t.name}</span>
+                <span className="text-4xl font-semibold tabular-nums">
+                  <CountUp value={passes(t.steps)} ms={400} />
+                  <span className="text-xl text-muted"> correct</span>
+                </span>
+              </div>
+              <StepDots steps={t.steps} total={h.steps} big />
+            </div>
+          ))}
+          {watching.length > 4 && <div className="text-center text-xl text-muted">+{watching.length - 4} more being watched</div>}
+        </div>
+      )}
+      {ranked.length > 0 && (
+        <div>
+          <div className="mb-2 text-sm font-semibold uppercase tracking-widest text-subtle">{h.phase === "done" ? "Final standings" : "Standings so far"}</div>
+          <ol className="space-y-2">
+            {ranked.map((s) => (
+              <li key={s.userId} className={`flex items-center gap-3 rounded-xl px-4 py-2.5 text-2xl ${s.winner ? "border border-warn bg-warn-soft" : "bg-sunken"}`}>
+                <RankBadge rank={s.rank!} />
+                <span className="flex-1 truncate font-medium">{s.name}</span>
+                {s.winner && <Crown size={24} className="text-warn" />}
+                <TeamIcon teamId={s.teamId} size={30} />
+                <span className="w-24 text-right font-semibold tabular-nums">
+                  <CountUp value={s.total} ms={800} /> <span className="text-base text-muted">/ {max}</span>
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
     </div>
   );
   return <Stage game={game} view={view} />;

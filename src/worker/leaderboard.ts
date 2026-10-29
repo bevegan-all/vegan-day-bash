@@ -1,5 +1,6 @@
 import { getSettings, shortName, type Env } from "./lib";
 import { parseTable } from "./scoring";
+import { rankHookstep } from "./hookstep";
 
 export interface Ranked {
   userId: number;
@@ -106,7 +107,7 @@ export async function computeIndividual(env: Env): Promise<IndividualBoards> {
        FROM results r
        JOIN games g ON g.id = r.game_id
        JOIN users u ON u.id = r.user_id
-      WHERE r.voided_at IS NULL AND g.status != 'draft'`,
+      WHERE r.voided_at IS NULL AND g.status != 'draft' AND g.type != 'hookstep'`,
   ).all<Row>();
 
   const byGame = new Map<number, Row[]>();
@@ -118,18 +119,27 @@ export async function computeIndividual(env: Env): Promise<IndividualBoards> {
 
   const perGame = new Map<number, Ranked[]>();
   const totals = new Map<number, { name: string; teamId: number | null; total: number; games: number }>();
-  for (const [gameId, rows] of byGame) {
-    const ranked = rankGame(rows);
-    perGame.set(gameId, ranked);
-    const race = rows[0].type === "greenred";
-    const table = race ? parseTable(settings.greenred_points, [3, 2, 1]) : rankPoints;
+  const award = (ranked: Ranked[], table: number[], fallback: number) => {
     for (const r of ranked) {
-      const pts = r.rank <= table.length ? table[r.rank - 1] : race ? 0 : participation;
+      const pts = r.rank <= table.length ? table[r.rank - 1] : fallback;
       const t = totals.get(r.userId) ?? { name: r.name, teamId: r.teamId, total: 0, games: 0 };
       t.total += pts;
       t.games += 1;
       totals.set(r.userId, t);
     }
+  };
+  for (const [gameId, rows] of byGame) {
+    const ranked = rankGame(rows);
+    perGame.set(gameId, ranked);
+    const race = rows[0].type === "greenred";
+    award(ranked, race ? parseTable(settings.greenred_points, [3, 2, 1]) : rankPoints, race ? 0 : participation);
+  }
+  // Hook Step Challenge: ranked from its rounds, and players who tie for the win all count as first
+  const { results: hooks } = await env.DB.prepare("SELECT id FROM games WHERE type = 'hookstep' AND status != 'draft'").all<{ id: number }>();
+  for (const h of hooks) {
+    const ranked = await rankHookstep(env, h.id);
+    perGame.set(h.id, ranked);
+    award(ranked, rankPoints, participation);
   }
 
   const arr = [...totals.entries()].map(([userId, t]) => ({ userId, ...t }));

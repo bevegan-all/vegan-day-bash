@@ -18,6 +18,7 @@ import { createUser, newLoginLink } from "./users";
 import { actConfig, buildGameDetail, memeConfig, pitchTally, sharkTimers } from "./games";
 import { parseTable, sharePoints, tieGroups } from "./scoring";
 import { notifyRemoved, notifyRoundEntries } from "./notify";
+import { hookAdminRoutes } from "./hookstep";
 
 export const adminRoutes = new Hono<AppEnv>();
 
@@ -27,6 +28,8 @@ adminRoutes.use("*", async (c, next) => {
   if (u.role === "participant") throw new HttpError(403, "Organisers only");
   await next();
 });
+
+adminRoutes.route("/", hookAdminRoutes);
 
 const me = (c: Ctx) => c.get("user") as User;
 const requireAdmin = (c: Ctx) => {

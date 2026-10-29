@@ -80,6 +80,12 @@ Players see whose turn it is, who is acting, the clock, the live score and wheth
 
 Players see whose turn it is, the phase and a live countdown on Home and on the game page. The countdowns come from the server clock, so every phone shows the same time. The three durations are in **Settings** (set them to a few seconds to rehearse).
 
+### Hook Step Challenge
+
+An individual game run in rounds of 10 hook steps. The organiser chooses the number of rounds (1 to 10) and the most players who can take part (the list stops there, even when several organisers add people at the same moment). In a round, an organiser taps **Watch** next to a player and then **Pass** or **Fail** after every step. Several organisers can each watch a different player at once, a player can only be watched by one organiser at a time (another can take over), and a double tap never records a step twice.
+
+After the last round the highest total of correct steps wins. If several players are level at the top they play a final round of 10 steps, and everyone still level after it wins together. A single leader after the rounds wins with no final. Players tied for the win all get the 1st place individual points. Players are alerted when added and when they reach the final; the public screen shows who is being watched, their pass/fail steps live, the standings, and a celebration for the final and the winners.
+
 ### The public screen
 
 `/screen?key=…` shows every live game with one shared template (`src/web/stage.tsx`): a progress strip (semi-final 1, semi-final 2, final / heats and final / rounds 1 to 5), a headline saying what is happening now (who is preparing, pitching, acting, racing, voting), the clock, and the details underneath. Votes count up as they arrive, averages and scores count up with an animated bar, and when a team moves on or wins, a full-screen celebration (team, crown, confetti, scores) plays for 10 seconds. A page that is just opened never replays old celebrations.

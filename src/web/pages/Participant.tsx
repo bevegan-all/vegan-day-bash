@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import QRCode from "qrcode";
 import { Check, ChevronRight, LogOut, SlidersHorizontal } from "lucide-react";
 import { teamById } from "../../shared/teams";
-import { api, fmtTime, usePoll, type Board, type GameDetail, type GameSummary, type TeamRow } from "../api";
+import { api, fmtTime, toFinishers, usePoll, type Board, type GameDetail, type GameSummary, type TeamRow } from "../api";
 import { isOrganiser, useAuth } from "../auth";
 import { TeamIcon } from "../art";
 import { BoardList, GameCard, GameThumb, LocationTag, MatchCard, Podium } from "../components";
@@ -243,59 +243,94 @@ export function GameView() {
 
 function GreenRedView({ game }: { game: GameDetail }) {
   const g = game.greenred!;
-  const rest = g.finishers.slice(3);
+  if (!g.mode || g.rounds.length === 0) {
+    return <Card className="text-center text-sm text-muted">The organisers will set up the race soon. If you're added, you'll get an alert.</Card>;
+  }
+  const multi = g.mode === "multi";
+  const heats = g.rounds.filter((r) => r.kind === "heat");
+  const final = g.rounds.find((r) => r.kind === "final")!;
+  const myHeat = heats.find((r) => g.mine.includes(r.id));
+  const inFinal = g.mine.includes(final.id);
+  const timed = final.entries.filter((e) => e.seconds != null);
+  const rest = timed.filter((e) => (e.rank ?? 99) > 3);
+  const pts = (i: number) => g.points[i] ?? 0;
+
   return (
     <>
-      <Card className={g.youIn ? "border-accent bg-accent-soft" : ""}>
-        {g.youIn ? (
+      <Card className={g.mine.length ? "border-accent bg-accent-soft" : ""}>
+        {g.mine.length ? (
           <div className="flex items-center gap-3">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent text-accent-fg">
               <Check size={20} strokeWidth={3} />
             </span>
             <div>
-              <div className="font-semibold">You're in this game</div>
+              <div className="font-semibold">{inFinal && multi ? "You made the final" : myHeat ? `You're in Heat ${myHeat.ord}` : "You're in this race"}</div>
               <div className="text-sm text-muted">Head to the {game.location} and wait for the organisers.</div>
             </div>
           </div>
         ) : (
-          <div className="text-sm text-muted">
-            {g.count > 0 ? `${g.count} players are in this game.` : "Organisers will add the players when the game starts."} You will get an alert if you are added.
-          </div>
+          <p className="text-sm text-muted">Organisers add the players for each round. You will get an alert if you're added.</p>
         )}
       </Card>
 
       <Card>
         <div className="mb-4 flex items-center justify-between">
-          <h3 className="font-semibold">Fastest finishers</h3>
-          {g.count > 0 && <span className="text-sm text-muted">{g.count} playing</span>}
+          <h3 className="font-semibold">{multi ? "Final: fastest" : "Fastest finishers"}</h3>
+          <span className="text-sm text-muted">
+            {final.entries.length} {multi ? "in the final" : "racing"}
+          </span>
         </div>
-        {g.finishers.length === 0 ? <p className="text-sm text-muted">No finish times yet.</p> : <Podium finishers={g.finishers} />}
+        {timed.length === 0 ? (
+          <p className="text-sm text-muted">{multi ? "The final starts when the heats are finished. The top 3 of each heat go through." : "No finish times yet."}</p>
+        ) : (
+          <Podium finishers={toFinishers(final.entries)} />
+        )}
         {rest.length > 0 && (
           <ul className="mt-4 divide-y divide-line border-t border-line">
-            {rest.map((f) => (
-              <li key={f.userId} className="flex items-center gap-3 py-2">
-                <RankBadge rank={f.rank} />
-                <span className="min-w-0 flex-1 truncate font-medium">{f.name}</span>
-                <TeamChip teamId={f.teamId} small />
-                <span className="w-16 text-right text-sm font-semibold tabular-nums">{fmtTime(f.seconds)}</span>
+            {rest.map((e) => (
+              <li key={e.userId} className="flex items-center gap-3 py-2">
+                <RankBadge rank={e.rank!} />
+                <span className="min-w-0 flex-1 truncate font-medium">{e.name}</span>
+                <TeamChip teamId={e.teamId} small />
+                <span className="w-16 text-right text-sm font-semibold tabular-nums">{fmtTime(e.seconds!)}</span>
               </li>
             ))}
           </ul>
         )}
+        <p className="mt-4 text-xs text-subtle">
+          Points: 1st {pts(0)}, 2nd {pts(1)}, 3rd {pts(2)}.
+        </p>
       </Card>
 
-      {g.roster.length > 0 && (
-        <details className="rounded-xl border border-line bg-surface p-4">
-          <summary className="cursor-pointer font-semibold">All players ({g.roster.length})</summary>
-          <ul className="mt-3 flex flex-wrap gap-2">
-            {g.roster.map((p) => (
-              <li key={p.userId} className="flex items-center gap-1.5 rounded-full bg-sunken py-1 pl-3 pr-1 text-sm">
-                {p.name} <TeamChip teamId={p.teamId} small />
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+      {multi &&
+        heats.map((h) => {
+          const top = h.entries.filter((e) => e.seconds != null).slice(0, 3);
+          return (
+            <details key={h.id} className="rounded-xl border border-line bg-surface p-4" open={h.status === "live"}>
+              <summary className="flex cursor-pointer items-center justify-between font-semibold">
+                <span>
+                  Heat {h.ord} <span className="font-normal text-muted">· {h.entries.length} players</span>
+                </span>
+                <StatusPill status={h.status === "done" ? "closed" : h.status === "live" ? "live" : "upcoming"} />
+              </summary>
+              {top.length > 0 ? (
+                <ul className="mt-3 divide-y divide-line">
+                  {top.map((e) => (
+                    <li key={e.userId} className="flex items-center gap-3 py-2">
+                      <RankBadge rank={e.rank!} />
+                      <span className="min-w-0 flex-1 truncate font-medium">{e.name}</span>
+                      <TeamChip teamId={e.teamId} small />
+                      <span className="w-16 text-right text-sm font-semibold tabular-nums">{fmtTime(e.seconds!)}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 text-sm text-muted">{h.entries.length ? "Racing soon." : "No players yet."}</p>
+              )}
+              {h.status === "done" && <p className="mt-2 text-xs text-subtle">The top 3 went to the final.</p>}
+            </details>
+          );
+        })}
     </>
   );
 }

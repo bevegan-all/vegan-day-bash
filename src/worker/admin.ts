@@ -17,7 +17,7 @@ import {
 import { createUser, newLoginLink } from "./users";
 import { actConfig, buildGameDetail, memeConfig, pitchTally, sharkTimers } from "./games";
 import { parseTable, sharePoints, tieGroups } from "./scoring";
-import { notifyNewPlayers, notifyRemoved } from "./notify";
+import { notifyRemoved, notifyRoundEntries } from "./notify";
 
 export const adminRoutes = new Hono<AppEnv>();
 
@@ -330,126 +330,216 @@ adminRoutes.delete("/results/:id", async (c) => {
   if (!row) throw new HttpError(404, "Result not found");
   if (row.match_ref) await c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE match_ref = ?").bind(now(), row.match_ref).run();
   else await c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE id = ?").bind(now(), id).run();
-  if (row.type === "greenred") await recalcGreenRed(c.env, row.game_id, me(c).id);
   await audit(c.env, me(c).id, "result.void", { id });
   return c.json({ ok: true });
 });
 
-// ---------- Roster (who is playing a game) ----------
+// ---------- Green Light – Red Light: one round, or heats and a final ----------
+// Times are recorded per round. Only the final (or the single round) counts for the leaderboard.
 
-async function rosterGame(c: Ctx, gameId: number) {
-  const g = await c.env.DB.prepare("SELECT id, type FROM games WHERE id = ?").bind(gameId).first<{ id: number; type: string }>();
-  if (!g) throw new HttpError(404, "No such game");
-  return g;
+interface GrRound {
+  id: number;
+  game_id: number;
+  ord: number;
+  kind: string;
+  status: string;
 }
 
-adminRoutes.post("/games/:id/players", async (c) => {
-  const g = await rosterGame(c, Number(c.req.param("id")));
+async function getGrRound(c: Ctx, id: number) {
+  const r = await c.env.DB.prepare("SELECT id, game_id, ord, kind, status FROM gr_rounds WHERE id = ?").bind(id).first<GrRound>();
+  if (!r) throw new HttpError(404, "No such round");
+  return r;
+}
+
+async function grGame(env: Env, gameId: number) {
+  const g = await env.DB.prepare("SELECT id, name, type, config FROM games WHERE id = ?").bind(gameId).first<{ id: number; name: string; type: string; config: string }>();
+  if (!g || g.type !== "greenred") throw new HttpError(404, "Not a Green Light – Red Light game");
+  const cfg = JSON.parse(g.config || "{}") as { mode?: string; heats?: number };
+  return { ...g, mode: cfg.mode ?? null, heats: cfg.heats ?? 0 };
+}
+
+const grLabel = (r: GrRound, mode: string | null) => (r.kind === "heat" ? `Heat ${r.ord}` : mode === "single" ? "the race" : "the final");
+
+async function writeFinalResult(env: Env, gameId: number, userId: number, seconds: number | null, by: number) {
+  const stmts = [env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND user_id = ? AND voided_at IS NULL").bind(now(), gameId, userId)];
+  if (seconds != null) stmts.push(env.DB.prepare("INSERT INTO results (game_id, user_id, value, created_by, created_at) VALUES (?, ?, ?, ?, ?)").bind(gameId, userId, seconds, by, now()));
+  await env.DB.batch(stmts);
+}
+
+// The top 3 of every finished heat go to the final. Re-run whenever a heat's times or status change.
+async function syncFinalists(env: Env, gameId: number, by: number) {
+  const g = await grGame(env, gameId);
+  const { results: rounds } = await env.DB.prepare("SELECT id, game_id, ord, kind, status FROM gr_rounds WHERE game_id = ? ORDER BY ord").bind(gameId).all<GrRound>();
+  const fin = rounds.find((r) => r.kind === "final");
+  if (!fin || g.mode !== "multi") return;
+  const desired = new Set<number>();
+  for (const heat of rounds.filter((r) => r.kind === "heat" && r.status === "done")) {
+    const { results } = await env.DB.prepare("SELECT user_id FROM gr_entries WHERE round_id = ? AND seconds IS NOT NULL ORDER BY seconds ASC, added_at ASC, user_id ASC LIMIT 3").bind(heat.id).all<{ user_id: number }>();
+    results.forEach((x) => desired.add(x.user_id));
+  }
+  const { results: current } = await env.DB.prepare("SELECT user_id, via FROM gr_entries WHERE round_id = ?").bind(fin.id).all<{ user_id: number; via: string }>();
+  const have = new Set(current.map((x) => x.user_id));
+  const stmts = [];
+  for (const x of current) {
+    if (x.via === "qualified" && !desired.has(x.user_id)) {
+      stmts.push(env.DB.prepare("DELETE FROM gr_entries WHERE round_id = ? AND user_id = ?").bind(fin.id, x.user_id));
+      stmts.push(env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND user_id = ? AND voided_at IS NULL").bind(now(), gameId, x.user_id));
+    }
+  }
+  for (const id of desired) {
+    if (!have.has(id)) stmts.push(env.DB.prepare("INSERT INTO gr_entries (round_id, user_id, added_by, added_at, via) VALUES (?, ?, ?, ?, 'qualified')").bind(fin.id, id, by, now()));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  await notifyRoundEntries(env, gameId, fin.id, `You made the final: ${g.name}`, "You were in the top 3 of your heat.");
+}
+
+adminRoutes.post("/games/:id/greenred/setup", async (c) => {
+  const g = await grGame(c.env, Number(c.req.param("id")));
+  const has = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM gr_rounds WHERE game_id = ?").bind(g.id).first<{ n: number }>();
+  if ((has?.n ?? 0) > 0) throw new HttpError(409, "The rounds are already set up");
+  const body = await c.req.json<{ mode?: string; heats?: number }>();
+  if (body.mode !== "single" && body.mode !== "multi") throw new HttpError(400, "Choose single round or multiple rounds");
+  const heats = body.mode === "multi" ? Math.floor(Number(body.heats ?? 4)) : 0;
+  if (body.mode === "multi" && !(heats >= 1 && heats <= 8)) throw new HttpError(400, "Pick between 1 and 8 heats");
+  const stmts = [c.env.DB.prepare("UPDATE games SET config = ? WHERE id = ?").bind(JSON.stringify({ mode: body.mode, heats }), g.id)];
+  if (body.mode === "single") stmts.push(c.env.DB.prepare("INSERT INTO gr_rounds (game_id, ord, kind) VALUES (?, 1, 'final')").bind(g.id));
+  else {
+    for (let i = 1; i <= heats; i++) stmts.push(c.env.DB.prepare("INSERT INTO gr_rounds (game_id, ord, kind) VALUES (?, ?, 'heat')").bind(g.id, i));
+    stmts.push(c.env.DB.prepare("INSERT INTO gr_rounds (game_id, ord, kind) VALUES (?, ?, 'final')").bind(g.id, heats + 1));
+  }
+  await c.env.DB.batch(stmts);
+  await audit(c.env, me(c).id, "greenred.setup", { gameId: g.id, mode: body.mode, heats });
+  return c.json({ ok: true });
+});
+
+// Start the whole game over (admin): removes the rounds, the times and the leaderboard entries
+adminRoutes.post("/games/:id/greenred/reset", async (c) => {
+  requireAdmin(c);
+  const g = await grGame(c.env, Number(c.req.param("id")));
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM gr_rounds WHERE game_id = ?").bind(g.id),
+    c.env.DB.prepare("UPDATE games SET config = '{}' WHERE id = ?").bind(g.id),
+    c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND voided_at IS NULL").bind(now(), g.id),
+  ]);
+  await audit(c.env, me(c).id, "greenred.reset", { gameId: g.id });
+  return c.json({ ok: true });
+});
+
+// Add people to a round. Several organisers can do this at once: each person is stored once.
+adminRoutes.post("/gr-rounds/:id/players", async (c) => {
+  const r = await getGrRound(c, Number(c.req.param("id")));
+  const g = await grGame(c.env, r.game_id);
   const body = await c.req.json<{ userIds?: number[]; scope?: "all" | "checked_in" | "team"; teamId?: number }>();
   let where = "";
   const args: number[] = [];
   if (body.userIds?.length) {
     const ids = [...new Set(body.userIds.map(Number))].filter((n) => Number.isInteger(n));
     if (!ids.length || ids.length > 300) throw new HttpError(400, "Pick between 1 and 300 people");
-    where = `WHERE id IN (${ids.map(() => "?").join(",")})`;
+    where = `id IN (${ids.map(() => "?").join(",")})`;
     args.push(...ids);
-  } else if (body.scope === "all") {
-    where = "WHERE team_id IS NOT NULL";
-  } else if (body.scope === "checked_in") {
-    where = "WHERE checked_in = 1";
-  } else if (body.scope === "team" && body.teamId) {
-    where = "WHERE team_id = ?";
+  } else if (body.scope === "all") where = "team_id IS NOT NULL";
+  else if (body.scope === "checked_in") where = "checked_in = 1";
+  else if (body.scope === "team" && body.teamId) {
+    where = "team_id = ?";
     args.push(Number(body.teamId));
-  } else {
-    throw new HttpError(400, "Say who to add");
-  }
-  const res = await c.env.DB.prepare(
-    `INSERT OR IGNORE INTO game_players (game_id, user_id, added_by, added_at)
-     SELECT ?, id, ?, ? FROM users ${where}`,
-  )
-    .bind(g.id, me(c).id, now(), ...args)
+  } else throw new HttpError(400, "Say who to add");
+  // a person can be in only one heat
+  const oneHeat = r.kind === "heat" ? " AND NOT EXISTS (SELECT 1 FROM gr_entries e2 JOIN gr_rounds r2 ON r2.id = e2.round_id WHERE r2.game_id = ? AND r2.kind = 'heat' AND e2.user_id = users.id)" : "";
+  const res = await c.env.DB.prepare(`INSERT OR IGNORE INTO gr_entries (round_id, user_id, added_by, added_at) SELECT ?, id, ?, ? FROM users WHERE ${where}${oneHeat}`)
+    .bind(r.id, me(c).id, now(), ...args, ...(r.kind === "heat" ? [r.game_id] : []))
     .run();
-  await notifyNewPlayers(c.env, g.id);
-  await audit(c.env, me(c).id, "roster.add", { gameId: g.id, added: res.meta.changes, scope: body.scope ?? "people" });
-  const total = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM game_players WHERE game_id = ?").bind(g.id).first<{ n: number }>();
+  await notifyRoundEntries(c.env, r.game_id, r.id, `You're in: ${g.name}`, `You have been added to ${grLabel(r, g.mode)}.`);
+  await audit(c.env, me(c).id, "greenred.add", { roundId: r.id, added: res.meta.changes, scope: body.scope ?? "people" });
+  const total = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM gr_entries WHERE round_id = ?").bind(r.id).first<{ n: number }>();
   return c.json({ added: res.meta.changes, total: total?.n ?? 0 });
 });
 
-adminRoutes.delete("/games/:id/players/:userId", async (c) => {
-  const g = await rosterGame(c, Number(c.req.param("id")));
+adminRoutes.delete("/gr-rounds/:id/players/:userId", async (c) => {
+  const r = await getGrRound(c, Number(c.req.param("id")));
   const userId = Number(c.req.param("userId"));
-  const res = await c.env.DB.prepare("DELETE FROM game_players WHERE game_id = ? AND user_id = ?").bind(g.id, userId).run();
+  const res = await c.env.DB.prepare("DELETE FROM gr_entries WHERE round_id = ? AND user_id = ?").bind(r.id, userId).run();
   if (res.meta.changes) {
-    // taking someone off also removes their finish time
-    await c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND user_id = ? AND voided_at IS NULL").bind(now(), g.id, userId).run();
-    if (g.type === "greenred") await recalcGreenRed(c.env, g.id, me(c).id);
-    await notifyRemoved(c.env, g.id, userId);
-    await audit(c.env, me(c).id, "roster.remove", { gameId: g.id, userId });
+    if (r.kind === "final") await writeFinalResult(c.env, r.game_id, userId, null, me(c).id);
+    else await syncFinalists(c.env, r.game_id, me(c).id);
+    await notifyRemoved(c.env, r.game_id, userId);
+    await audit(c.env, me(c).id, "greenred.remove", { roundId: r.id, userId });
   }
   return c.json({ ok: true });
 });
 
-// Clear the whole list (for a mistake). Nobody is told, and finish times are removed.
-adminRoutes.delete("/games/:id/players", async (c) => {
-  const g = await rosterGame(c, Number(c.req.param("id")));
-  await c.env.DB.batch([
-    c.env.DB.prepare("DELETE FROM game_players WHERE game_id = ?").bind(g.id),
-    c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND voided_at IS NULL").bind(now(), g.id),
-  ]);
-  if (g.type === "greenred") await recalcGreenRed(c.env, g.id, me(c).id);
-  await audit(c.env, me(c).id, "roster.clear", { gameId: g.id });
+// Clear the whole list of a round (for a mistake). Nobody is told.
+adminRoutes.delete("/gr-rounds/:id/players", async (c) => {
+  const r = await getGrRound(c, Number(c.req.param("id")));
+  const { results } = await c.env.DB.prepare("SELECT user_id FROM gr_entries WHERE round_id = ?").bind(r.id).all<{ user_id: number }>();
+  await c.env.DB.prepare("DELETE FROM gr_entries WHERE round_id = ?").bind(r.id).run();
+  if (r.kind === "final") for (const x of results) await writeFinalResult(c.env, r.game_id, x.user_id, null, me(c).id);
+  else await syncFinalists(c.env, r.game_id, me(c).id);
+  await audit(c.env, me(c).id, "greenred.clear", { roundId: r.id });
   return c.json({ ok: true });
 });
 
-// ---------- Green Light – Red Light: finish times ----------
-
-// Fastest finisher wins. Team points are always recomputed from the recorded times,
-// so adding, changing or removing a time keeps the points correct.
-async function recalcGreenRed(env: Env, gameId: number, by: number) {
-  const s = await getSettings(env);
-  const table = parseTable(s.team_rank_points);
-  const ref = `gr:${gameId}`;
-  const { results } = await env.DB.prepare(
-    `SELECT r.value, u.team_id FROM results r JOIN users u ON u.id = r.user_id
-      WHERE r.game_id = ? AND r.voided_at IS NULL AND u.team_id IS NOT NULL`,
-  )
-    .bind(gameId)
-    .all<{ value: number; team_id: number }>();
-  const stmts = [env.DB.prepare("UPDATE team_points SET voided_at = ? WHERE ref = ? AND voided_at IS NULL").bind(now(), ref)];
-  if (results.length) {
-    // team ranking: more finishers is better, and the fastest finisher breaks a tie
-    const { results: teams } = await env.DB.prepare("SELECT id FROM teams ORDER BY id").all<{ id: number }>();
-    const stats = teams.map((tm) => {
-      const mine = results.filter((r) => r.team_id === tm.id);
-      return { id: tm.id, count: mine.length, best: mine.length ? Math.min(...mine.map((r) => r.value)) : Infinity };
-    });
-    stats.sort((a, b) => b.count - a.count || a.best - b.best || a.id - b.id);
-    const groups = tieGroups(stats, (x) => `${x.count}:${x.best}`, (x) => x.id);
-    for (const [teamId, v] of sharePoints(groups, table)) {
-      if (v.points > 0) stmts.push(addPoints(env, gameId, teamId, v.points, "Green Light – Red Light", ref, by));
-    }
-  }
-  await env.DB.batch(stmts);
-}
-
-adminRoutes.post("/games/:id/finish", async (c) => {
-  const gameId = Number(c.req.param("id"));
-  const game = await c.env.DB.prepare("SELECT id, type FROM games WHERE id = ?").bind(gameId).first<{ id: number; type: string }>();
-  if (!game || game.type !== "greenred") throw new HttpError(404, "Not a Green Light – Red Light game");
+// Record (or change) a finish time. A person who finishes is on the list even if they were not added first.
+adminRoutes.post("/gr-rounds/:id/time", async (c) => {
+  const r = await getGrRound(c, Number(c.req.param("id")));
   const body = await c.req.json<{ userId?: number; seconds?: number }>();
   const seconds = Math.round(Number(body.seconds) * 100) / 100;
   if (!body.userId || !Number.isFinite(seconds) || seconds <= 0 || seconds > 3600) throw new HttpError(400, "Pick a person and enter a time in seconds (for example 12.4)");
   const person = await c.env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(body.userId).first();
   if (!person) throw new HttpError(404, "No such person");
+  if (r.kind === "heat") {
+    const other = await c.env.DB.prepare("SELECT 1 FROM gr_entries e JOIN gr_rounds r2 ON r2.id = e.round_id WHERE r2.game_id = ? AND r2.kind = 'heat' AND r2.id != ? AND e.user_id = ?").bind(r.game_id, r.id, body.userId).first();
+    if (other) throw new HttpError(409, "This person is in a different heat");
+  }
   await c.env.DB.batch([
-    // anyone who finishes is on the player list (silently if they were not added first)
-    c.env.DB.prepare("INSERT OR IGNORE INTO game_players (game_id, user_id, added_by, added_at, notified) VALUES (?, ?, ?, ?, 1)").bind(gameId, body.userId, me(c).id, now()),
-    c.env.DB.prepare("UPDATE results SET voided_at = ? WHERE game_id = ? AND user_id = ? AND voided_at IS NULL").bind(now(), gameId, body.userId),
-    c.env.DB.prepare("INSERT INTO results (game_id, user_id, value, created_by, created_at) VALUES (?, ?, ?, ?, ?)").bind(gameId, body.userId, seconds, me(c).id, now()),
+    c.env.DB.prepare("INSERT OR IGNORE INTO gr_entries (round_id, user_id, added_by, added_at, notified) VALUES (?, ?, ?, ?, 1)").bind(r.id, body.userId, me(c).id, now()),
+    c.env.DB.prepare("UPDATE gr_entries SET seconds = ? WHERE round_id = ? AND user_id = ?").bind(seconds, r.id, body.userId),
   ]);
-  await recalcGreenRed(c.env, gameId, me(c).id);
-  await audit(c.env, me(c).id, "greenred.finish", { gameId, userId: body.userId, seconds });
+  if (r.kind === "final") await writeFinalResult(c.env, r.game_id, body.userId, seconds, me(c).id);
+  else if (r.status === "done") await syncFinalists(c.env, r.game_id, me(c).id);
+  await audit(c.env, me(c).id, "greenred.time", { roundId: r.id, userId: body.userId, seconds });
   return c.json({ ok: true });
+});
+
+adminRoutes.delete("/gr-rounds/:id/time/:userId", async (c) => {
+  const r = await getGrRound(c, Number(c.req.param("id")));
+  const userId = Number(c.req.param("userId"));
+  await c.env.DB.prepare("UPDATE gr_entries SET seconds = NULL WHERE round_id = ? AND user_id = ?").bind(r.id, userId).run();
+  if (r.kind === "final") await writeFinalResult(c.env, r.game_id, userId, null, me(c).id);
+  else if (r.status === "done") await syncFinalists(c.env, r.game_id, me(c).id);
+  return c.json({ ok: true });
+});
+
+// Start a round, or finish it. Finishing a heat sends its top 3 to the final.
+adminRoutes.post("/gr-rounds/:id/status", async (c) => {
+  const r = await getGrRound(c, Number(c.req.param("id")));
+  const { status } = await c.req.json<{ status?: string }>();
+  if (status !== "idle" && status !== "live" && status !== "done") throw new HttpError(400, "Bad status");
+  if (r.kind === "heat" && r.status === "done" && status !== "done") {
+    const started = await c.env.DB.prepare(
+      "SELECT 1 FROM gr_entries e JOIN gr_rounds f ON f.id = e.round_id WHERE f.game_id = ? AND f.kind = 'final' AND e.seconds IS NOT NULL LIMIT 1",
+    ).bind(r.game_id).first();
+    if (started) throw new HttpError(409, "The final already has times, so this heat can't be reopened");
+  }
+  await c.env.DB.prepare("UPDATE gr_rounds SET status = ? WHERE id = ?").bind(status, r.id).run();
+  if (r.kind === "heat") await syncFinalists(c.env, r.game_id, me(c).id);
+  await audit(c.env, me(c).id, "greenred.status", { roundId: r.id, status });
+  return c.json({ ok: true });
+});
+
+// Multi-round mode: share everyone out across the heats at random, in one tap
+adminRoutes.post("/games/:id/greenred/split", async (c) => {
+  const g = await grGame(c.env, Number(c.req.param("id")));
+  if (g.mode !== "multi") throw new HttpError(400, "This only works with multiple rounds");
+  const { results: heats } = await c.env.DB.prepare("SELECT id, game_id, ord, kind, status FROM gr_rounds WHERE game_id = ? AND kind = 'heat' ORDER BY ord").bind(g.id).all<GrRound>();
+  const used = await c.env.DB.prepare("SELECT 1 FROM gr_entries e JOIN gr_rounds r ON r.id = e.round_id WHERE r.game_id = ? AND r.kind = 'heat' LIMIT 1").bind(g.id).first();
+  if (used) throw new HttpError(409, "Some heats already have players. Clear them first.");
+  const { results: people } = await c.env.DB.prepare("SELECT id FROM users WHERE team_id IS NOT NULL").all<{ id: number }>();
+  const shuffled = people.map((p) => p.id).sort(() => Math.random() - 0.5);
+  const stmts = shuffled.map((id, i) => c.env.DB.prepare("INSERT INTO gr_entries (round_id, user_id, added_by, added_at) VALUES (?, ?, ?, ?)").bind(heats[i % heats.length].id, id, me(c).id, now()));
+  if (stmts.length) await c.env.DB.batch(stmts);
+  for (const h of heats) await notifyRoundEntries(c.env, g.id, h.id, `You're in: ${g.name}`, `You have been added to Heat ${h.ord}.`);
+  await audit(c.env, me(c).id, "greenred.split", { gameId: g.id, people: shuffled.length });
+  return c.json({ ok: true, people: shuffled.length, heats: heats.length });
 });
 
 // ---------- Brackets (Meme Charades and Shark Tank) ----------

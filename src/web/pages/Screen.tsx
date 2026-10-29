@@ -1,7 +1,7 @@
 import { useSearchParams } from "react-router-dom";
 import { Crown } from "lucide-react";
 import { teamById } from "../../shared/teams";
-import { usePoll, stageLabel, type Board, type GameDetail, type Match, type Pitch, type TeamRow } from "../api";
+import { usePoll, stageLabel, toFinishers, type Board, type GameDetail, type GrRound, type Match, type Pitch, type TeamRow } from "../api";
 import { ActTimer, TurnTracker } from "../meme";
 import { RoundResults, TeamOrder } from "../actout";
 import { PhaseChip, PhaseTimer, useClock } from "../shark";
@@ -88,6 +88,29 @@ export function Screen() {
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+// Green Light – Red Light on the big screen: the final's podium, or the heat being run
+function ScreenRace({ g }: { g: NonNullable<GameDetail["greenred"]> }) {
+  if (!g.mode || g.rounds.length === 0) return <div className="py-4 text-center text-3xl font-semibold">Green light, red light</div>;
+  const final = g.rounds.find((r) => r.kind === "final")!;
+  const hasTimes = (r: GrRound) => r.entries.some((e) => e.seconds != null);
+  const shown = hasTimes(final) ? final : (g.rounds.find((r) => r.status === "live") ?? [...g.rounds].reverse().find(hasTimes) ?? final);
+  const label = shown.kind === "heat" ? `Heat ${shown.ord}` : g.mode === "single" ? "The race" : "The final";
+  const timed = shown.entries.filter((e) => e.seconds != null);
+  return (
+    <div>
+      <div className="mb-4 flex items-end justify-between">
+        <span className="text-3xl font-semibold">{label}</span>
+        <span className="text-xl text-muted">
+          {shown.entries.length} {shown.entries.length === 1 ? "player" : "players"}
+          {shown.status === "done" ? " · finished" : shown.status === "live" ? " · racing now" : ""}
+        </span>
+      </div>
+      {timed.length === 0 ? <div className="py-4 text-center text-2xl text-muted">Ready, steady…</div> : <Podium finishers={toFinishers(shown.entries)} big />}
+      {timed.length > 3 && <div className="mt-4 text-center text-xl text-muted">{timed.length - 3} more finished</div>}
     </div>
   );
 }
@@ -251,21 +274,7 @@ function LiveGame({ game }: { game: GameDetail }) {
           </div>
         ))}
 
-      {game.type === "greenred" && game.greenred && (
-        <div>
-          {game.greenred.finishers.length === 0 ? (
-            <div className="py-4 text-center">
-              <div className="text-3xl font-semibold">Green light, red light</div>
-              <div className="mt-2 text-xl text-muted">{game.greenred.count} players ready</div>
-            </div>
-          ) : (
-            <>
-              <Podium finishers={game.greenred.finishers} big />
-              {game.greenred.finishers.length > 3 && <div className="mt-4 text-center text-xl text-muted">{game.greenred.finishers.length - 3} more finished</div>}
-            </>
-          )}
-        </div>
-      )}
+      {game.type === "greenred" && game.greenred && <ScreenRace g={game.greenred} />}
 
       {game.type === "individual" && game.board && (
         <ol className="space-y-2 text-2xl">

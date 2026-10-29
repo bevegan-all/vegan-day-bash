@@ -100,6 +100,28 @@ export interface Finisher {
   rank: number;
 }
 
+export interface GrEntry {
+  userId: number;
+  name: string;
+  teamId: number | null;
+  seconds: number | null;
+  rank: number | null;
+  via: "manual" | "qualified";
+}
+
+export interface GrRound {
+  id: number;
+  ord: number;
+  kind: "heat" | "final";
+  status: "idle" | "live" | "done";
+  entries: GrEntry[];
+}
+
+export const grLabel = (r: { kind: string; ord: number }, mode: string | null) => (r.kind === "heat" ? `Heat ${r.ord}` : mode === "single" ? "race" : "final");
+
+export const toFinishers = (entries: GrEntry[]): Finisher[] =>
+  entries.filter((e) => e.seconds != null).map((e) => ({ resultId: 0, userId: e.userId, name: e.name, teamId: e.teamId, seconds: e.seconds as number, rank: e.rank as number }));
+
 export interface RosterPlayer {
   userId: number;
   name: string;
@@ -300,10 +322,11 @@ export interface GameDetail extends GameSummary {
   board?: Board;
   recent?: { id: number; value: number; at: number; name: string; teamId: number | null; matchRef: string | null }[];
   greenred?: {
-    count: number;
-    youIn: boolean;
-    finishers: Finisher[];
-    roster: RosterPlayer[];
+    mode: "single" | "multi" | null;
+    heats: number;
+    points: number[];
+    mine: number[];
+    rounds: GrRound[];
   } | null;
 }
 

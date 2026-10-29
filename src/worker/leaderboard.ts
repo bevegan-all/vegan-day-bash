@@ -1,4 +1,5 @@
 import { getSettings, shortName, type Env } from "./lib";
+import { parseTable } from "./scoring";
 
 export interface Ranked {
   userId: number;
@@ -120,8 +121,10 @@ export async function computeIndividual(env: Env): Promise<IndividualBoards> {
   for (const [gameId, rows] of byGame) {
     const ranked = rankGame(rows);
     perGame.set(gameId, ranked);
+    const race = rows[0].type === "greenred";
+    const table = race ? parseTable(settings.greenred_points, [3, 2, 1]) : rankPoints;
     for (const r of ranked) {
-      const pts = r.rank <= rankPoints.length ? rankPoints[r.rank - 1] : participation;
+      const pts = r.rank <= table.length ? table[r.rank - 1] : race ? 0 : participation;
       const t = totals.get(r.userId) ?? { name: r.name, teamId: r.teamId, total: 0, games: 0 };
       t.total += pts;
       t.games += 1;

@@ -9,6 +9,7 @@ import { GameThumb, LocationTag, Podium } from "../components";
 import { PersonField, PersonPickerModal, type Person } from "../pickers";
 import { ActTimer, TurnTracker } from "../meme";
 import { ActOutControl } from "./ActOutControl";
+import { GreenRedControl } from "./GreenRedControl";
 import { PhaseChip, PhaseSteps, PhaseTimer, useClock } from "../shark";
 import { Btn, Card, Countdown, ErrorBox, IconBtn, Modal, Page, RankBadge, SectionLabel, Spinner, StatusPill, TeamChip, TeamMark, TeamName, toast, toastError } from "../ui";
 
@@ -34,7 +35,7 @@ export function GameControl() {
   const { me } = useAuth();
   const [every, setEvery] = useState(8000);
   const { data, error, loading, reload } = usePoll<GameDetail>(`/admin/games/${id}`, every);
-  const live = data?.type === "meme" || data?.type === "shark" || data?.type === "actout";
+  const live = data?.type === "meme" || data?.type === "shark" || data?.type === "actout" || data?.type === "greenred";
   useEffect(() => setEvery(live ? 4000 : 8000), [live]);
 
   async function setStatus(status: string) {
@@ -185,165 +186,6 @@ function IndividualControl({ game, reload }: { game: GameDetail; reload: () => v
           )}
         </Card>
       </section>
-    </>
-  );
-}
-
-// ---------- Green Light – Red Light ----------
-function GreenRedControl({ game, reload }: { game: GameDetail; reload: () => void }) {
-  const g = game.greenred;
-  const roster = g?.roster ?? [];
-  const finishers = g?.finishers ?? [];
-  const [adding, setAdding] = useState(false);
-  const [person, setPerson] = useState<Person | null>(null);
-  const [seconds, setSeconds] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function addScope(scope: "all" | "checked_in" | "team", label: string, teamId?: number) {
-    if (!confirm(`Add ${label}? Each person gets an alert on their phone.`)) return;
-    try {
-      const r = await api<{ added: number; total: number }>(`/admin/games/${game.id}/players`, { body: { scope, teamId } });
-      toast(r.added ? `Added ${r.added} players, ${r.total} in total` : "Everyone there was already added");
-      reload();
-    } catch (e) {
-      toastError(e);
-    }
-  }
-
-  async function addPerson(p: Person) {
-    if (await call(`/admin/games/${game.id}/players`, { userIds: [p.id] })) reload();
-  }
-
-  async function removePlayer(userId: number, name: string) {
-    if (!confirm(`Take ${name} off the player list? They get an alert, and any finish time they have is removed.`)) return;
-    if (await call(`/admin/games/${game.id}/players/${userId}`, undefined, "DELETE")) reload();
-  }
-
-  async function clearAll() {
-    if (!confirm("Clear the whole player list and all finish times? Nobody is told. This is for fixing a mistake.")) return;
-    if (await call(`/admin/games/${game.id}/players`, undefined, "DELETE")) {
-      toast("Player list cleared");
-      reload();
-    }
-  }
-
-  async function saveTime() {
-    setBusy(true);
-    if (await call(`/admin/games/${game.id}/finish`, { userId: person?.id, seconds: Number(seconds) })) {
-      toast(`${person?.name}: ${fmtTime(Number(seconds))}`);
-      setPerson(null);
-      setSeconds("");
-      reload();
-    }
-    setBusy(false);
-  }
-
-  async function removeTime(resultId: number) {
-    if (!confirm("Remove this finish time?")) return;
-    if (await call(`/admin/results/${resultId}`, undefined, "DELETE")) reload();
-  }
-
-  const timeOk = seconds !== "" && Number(seconds) > 0 && Number.isFinite(Number(seconds));
-
-  return (
-    <>
-      <Card className="space-y-3">
-        <div>
-          <h2 className="font-semibold">Players ({roster.length})</h2>
-          <p className="mt-1 text-sm text-muted">Everyone you add gets an alert on their phone telling them they are in and where to go ({game.location}).</p>
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <Btn variant="secondary" size="sm" onClick={() => addScope("all", "everyone")}>
-            Add everyone
-          </Btn>
-          <Btn variant="secondary" size="sm" onClick={() => addScope("checked_in", "everyone checked in")}>
-            Add checked-in
-          </Btn>
-          {TEAMS.map((t) => (
-            <Btn key={t.id} variant="secondary" size="sm" onClick={() => addScope("team", `all of Team ${t.name}`, t.id)}>
-              <TeamIcon teamId={t.id} size={20} /> Team {t.name}
-            </Btn>
-          ))}
-        </div>
-        <Btn full onClick={() => setAdding(true)}>
-          <ScanLine size={18} /> Add people (scan or search)
-        </Btn>
-        {adding && <PersonPickerModal title="Add players" multi onPick={addPerson} onClose={() => setAdding(false)} />}
-      </Card>
-
-      <Card className="space-y-3">
-        <div>
-          <h2 className="font-semibold">Record a finish</h2>
-          <p className="mt-1 text-sm text-muted">Scan the player at the finish line and type their time. The fastest time wins. Saving again for the same person replaces their time.</p>
-        </div>
-        <PersonField label="Finisher" value={person} onChange={setPerson} />
-        <div>
-          <div className="mb-1.5 text-sm font-medium text-muted">Time in seconds</div>
-          <input
-            className="w-full rounded-lg border border-line bg-surface px-3.5 py-3 text-2xl font-semibold tabular-nums outline-none focus:border-accent focus:ring-2 focus:ring-accent/25"
-            inputMode="decimal"
-            placeholder="12.40"
-            aria-label="Time in seconds"
-            value={seconds}
-            onChange={(e) => setSeconds(e.target.value)}
-          />
-        </div>
-        <Btn full size="lg" busy={busy} disabled={!person || !timeOk} onClick={saveTime}>
-          Save time
-        </Btn>
-      </Card>
-
-      <section>
-        <SectionLabel>Results</SectionLabel>
-        <Card className="space-y-4">
-          {finishers.length === 0 ? <p className="text-sm text-muted">No finish times yet.</p> : <Podium finishers={finishers} />}
-          {finishers.length > 0 && (
-            <ul className="divide-y divide-line border-t border-line">
-              {finishers.map((f) => (
-                <li key={f.resultId} className="flex items-center gap-2 py-2">
-                  <RankBadge rank={f.rank} />
-                  <span className="min-w-0 flex-1 truncate font-medium">{f.name}</span>
-                  <TeamChip teamId={f.teamId} small />
-                  <span className="w-16 text-right text-sm font-semibold tabular-nums">{fmtTime(f.seconds)}</span>
-                  <IconBtn label="Remove time" onClick={() => removeTime(f.resultId)} className="!h-8 !w-8 text-danger">
-                    <X size={18} />
-                  </IconBtn>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      </section>
-
-      <details className="rounded-xl border border-line bg-surface p-4" open={roster.length > 0 && roster.length <= 12}>
-        <summary className="cursor-pointer font-semibold">Player list ({roster.length})</summary>
-        <ul className="mt-2 divide-y divide-line">
-          {roster.map((p) => (
-            <li key={p.userId} className="flex items-center gap-2 py-2">
-              <span className="min-w-0 flex-1 truncate font-medium">{p.name}</span>
-              <TeamChip teamId={p.teamId} small />
-              <button
-                className="w-16 text-right text-sm font-semibold tabular-nums text-accent"
-                onClick={() => {
-                  setPerson({ id: p.userId, name: p.name, teamId: p.teamId });
-                  window.scrollTo({ top: 0, behavior: "smooth" });
-                }}
-              >
-                {p.seconds != null ? fmtTime(p.seconds) : "Set time"}
-              </button>
-              <IconBtn label={`Remove ${p.name}`} onClick={() => removePlayer(p.userId, p.name)} className="!h-8 !w-8 text-danger">
-                <X size={18} />
-              </IconBtn>
-            </li>
-          ))}
-          {roster.length === 0 && <li className="py-4 text-center text-sm text-muted">No players added yet.</li>}
-        </ul>
-        {roster.length > 0 && (
-          <Btn variant="ghost" size="sm" className="mt-2" onClick={clearAll}>
-            Clear the whole list
-          </Btn>
-        )}
-      </details>
     </>
   );
 }

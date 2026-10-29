@@ -1,5 +1,6 @@
 import { HttpError, getSettings, shortName, type Env, type User } from "./lib";
 import { computeIndividual, publicBoard } from "./leaderboard";
+import { parseTable } from "./scoring";
 
 export async function sharkTimers(env: Env) {
   const s = await getSettings(env);
@@ -57,11 +58,12 @@ interface GameRow {
   rules: string;
   status: string;
   location: string;
+  config: string;
 }
 
 // viewer: the signed-in user, or null for the public big screen.
 export async function buildGameDetail(env: Env, gameId: number, viewer: User | null, organiser = false) {
-  const game = await env.DB.prepare("SELECT id, slug, name, kind, type, result_type, description, rules, status, location FROM games WHERE id = ?")
+  const game = await env.DB.prepare("SELECT id, slug, name, kind, type, result_type, description, rules, status, location, config FROM games WHERE id = ?")
     .bind(gameId)
     .first<GameRow>();
   if (!game || (game.status === "draft" && !organiser)) throw new HttpError(404, "Game not found");
@@ -205,42 +207,39 @@ export async function buildGameDetail(env: Env, gameId: number, viewer: User | n
     let greenred: unknown = undefined;
     if (game.type === "greenred") {
       const display = (n: string) => (organiser ? n : shortName(n));
-      const { results: roster } = await env.DB.prepare(
-        `SELECT gp.user_id AS userId, u.display_name AS name, u.team_id AS teamId
-           FROM game_players gp JOIN users u ON u.id = gp.user_id WHERE gp.game_id = ? ORDER BY u.display_name`,
-      )
-        .bind(gameId)
-        .all<{ userId: number; name: string; teamId: number | null }>();
-      const { results: times } = await env.DB.prepare(
-        "SELECT id, user_id AS userId, value AS seconds FROM results WHERE game_id = ? AND voided_at IS NULL ORDER BY value, created_at",
-      )
-        .bind(gameId)
-        .all<{ id: number; userId: number; seconds: number }>();
-      const byUser = new Map(roster.map((p) => [p.userId, p]));
-      const timeOf = new Map(times.map((t) => [t.userId, t]));
-      const finishers = times.map((t, i) => {
-        const p = byUser.get(t.userId);
-        return {
-          resultId: t.id,
-          userId: t.userId,
-          name: display(p?.name ?? "Player"),
-          teamId: p?.teamId ?? null,
-          seconds: t.seconds,
-          rank: i > 0 && times[i - 1].seconds === t.seconds ? 0 : i + 1,
-        };
+      const cfg = JSON.parse(game.config || "{}") as { mode?: string; heats?: number };
+      const [rounds, entries, settings] = await Promise.all([
+        env.DB.prepare("SELECT id, ord, kind, status FROM gr_rounds WHERE game_id = ? ORDER BY ord").bind(gameId).all<{ id: number; ord: number; kind: string; status: string }>(),
+        env.DB.prepare(
+          `SELECT e.round_id AS roundId, e.user_id AS userId, u.display_name AS name, u.team_id AS teamId, e.seconds, e.via
+             FROM gr_entries e JOIN users u ON u.id = e.user_id JOIN gr_rounds r ON r.id = e.round_id
+            WHERE r.game_id = ? ORDER BY e.seconds IS NULL, e.seconds, u.display_name`,
+        )
+          .bind(gameId)
+          .all<{ roundId: number; userId: number; name: string; teamId: number | null; seconds: number | null; via: string }>(),
+        getSettings(env),
+      ]);
+      const roundsOut = rounds.results.map((r) => {
+        const list = entries.results.filter((x) => x.roundId === r.id);
+        let rank = 0;
+        let prev: number | null = null;
+        const out = list.map((x, i) => {
+          let myRank: number | null = null;
+          if (x.seconds != null) {
+            if (x.seconds !== prev) rank = i + 1;
+            prev = x.seconds;
+            myRank = rank;
+          }
+          return { userId: x.userId, name: display(x.name), teamId: x.teamId, seconds: x.seconds, rank: myRank, via: x.via };
+        });
+        return { id: r.id, ord: r.ord, kind: r.kind, status: r.status, entries: out };
       });
-      for (let i = 0; i < finishers.length; i++) if (finishers[i].rank === 0) finishers[i].rank = finishers[i - 1].rank;
       greenred = {
-        count: roster.length,
-        youIn: !!viewer && byUser.has(viewer.id),
-        finishers,
-        roster: roster.map((p) => ({
-          userId: p.userId,
-          name: display(p.name),
-          teamId: p.teamId,
-          seconds: timeOf.get(p.userId)?.seconds ?? null,
-          resultId: timeOf.get(p.userId)?.id ?? null,
-        })),
+        mode: cfg.mode ?? null,
+        heats: cfg.heats ?? 0,
+        points: parseTable(settings.greenred_points, [3, 2, 1]),
+        mine: viewer ? rounds.results.filter((r) => entries.results.some((x) => x.roundId === r.id && x.userId === viewer.id)).map((r) => r.id) : [],
+        rounds: roundsOut,
       };
     }
     return { ...base, board, recent, greenred };

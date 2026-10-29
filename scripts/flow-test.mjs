@@ -378,108 +378,151 @@ await admin.req(`/admin/results/${rec[0].id}`, undefined, "DELETE");
 const rec2 = (await admin.req(`/admin/games/${cup.id}`)).j.recent;
 ok(rec2.length === rec.length - 2, "voiding a match removes both sides");
 
-// ---- Green Light Red Light: location, roster, alerts, finish times
+// ---- Green Light – Red Light: an individual game with one round, or heats and a final
+{
 const gr = g("green-light-red-light");
+ok(gr.kind === "individual" && gr.type === "greenred", "Green Light – Red Light is in the individual games");
 ok(gr.location === "Terrace", "default location is Terrace");
 r = await admin.req(`/admin/games/${gr.id}`, { location: "Hall" }, "PATCH");
 ok(r.status === 200, "admin can change location");
 r = await users[0].c.req(`/admin/games/${gr.id}`, { location: "Roof" }, "PATCH");
 ok(r.status === 403, "participant cannot change location");
-r = await admin.req(`/admin/games/${gr.id}`, { location: "Terrace" }, "PATCH");
+await admin.req(`/admin/games/${gr.id}`, { location: "Terrace" }, "PATCH");
 
-const teamsBefore = Object.fromEntries((await users[0].c.req("/leaderboard/teams")).j.teams.map((t) => [t.teamId, t.total]));
-r = await admin.req(`/admin/games/${gr.id}/players`, { scope: "all" });
-ok(r.status === 200 && r.j.added > 0 && r.j.added === r.j.total, `added everyone to the roster (${r.j.added})`);
-const addedAll = r.j.added;
-r = await admin.req(`/admin/games/${gr.id}/players`, { scope: "all" });
-ok(r.j.added === 0, "adding everyone again adds nobody");
-let pulse = (await users[0].c.req("/pulse")).j;
-ok(pulse.notifications.length === 1 && /in:/i.test(pulse.notifications[0].title) && /Terrace/.test(pulse.notifications[0].body), "player got exactly one 'you are in' alert mentioning the location");
-let det = (await users[0].c.req(`/games/${gr.id}`)).j;
-ok(det.greenred.youIn === true && det.greenred.count === addedAll, "player sees they are in the game");
-ok(!/Tester1 Person/.test(JSON.stringify(det.greenred.roster)) && /Tester1 P\./.test(JSON.stringify(det.greenred.roster)), "participants see short names only");
-const list = (await users[0].c.req("/games")).j.games.find((x) => x.id === gr.id);
-ok(list.youIn === true && list.location === "Terrace", "games list shows youIn and location");
+const teamsBeforeGr = Object.fromEntries((await users[0].c.req("/leaderboard/teams")).j.teams.map((x) => [x.teamId, x.total]));
+const overall = async () => Object.fromEntries((await admin.req("/leaderboard/individual?game=all&full=1")).j.top.map((x) => [x.userId, x.value]));
+const overallBefore = await overall();
 
-// remove one player
-r = await admin.req(`/admin/games/${gr.id}/players/${users[11].id}`, undefined, "DELETE");
-ok(r.status === 200, "player removed");
-pulse = (await users[11].c.req("/pulse")).j;
-ok(pulse.notifications.some((n) => /Removed/.test(n.title)), "removed player got an alert");
-det = (await users[11].c.req(`/games/${gr.id}`)).j;
-ok(det.greenred.youIn === false, "removed player no longer 'in'");
+const mkOrg2 = async (name) => {
+  const made = await admin.req("/admin/users", { name, role: "organiser" });
+  const cl = new Client();
+  await cl.req("/auth/login", { username: made.j.username, password: made.j.password });
+  return cl;
+};
+const [oA, oB, oC] = [await mkOrg2("Race Organiser A"), await mkOrg2("Race Organiser B"), await mkOrg2("Race Organiser C")];
+const grDetail = async (who = admin) => (await who.req(`/admin/games/${gr.id}`)).j.greenred;
 
-// alerts can be marked read
-await users[0].c.req("/notifications/read", {});
-pulse = (await users[0].c.req("/pulse")).j;
-ok(pulse.notifications.length === 0, "alerts marked read");
-const hist = (await users[0].c.req("/notifications")).j.notifications;
-ok(hist.length === 1 && hist[0].readAt, "alert history kept");
+r = await admin.req(`/admin/games/${gr.id}/greenred/setup`, { mode: "weird" });
+ok(r.status === 400, "the mode must be single or multiple rounds");
+r = await users[0].c.req(`/admin/games/${gr.id}/greenred/setup`, { mode: "single" });
+ok(r.status === 403, "players can't set the game up");
+r = await admin.req(`/admin/games/${gr.id}/greenred/setup`, { mode: "multi", heats: 9 });
+ok(r.status === 400, "at most 8 heats");
+r = await admin.req(`/admin/games/${gr.id}/greenred/setup`, { mode: "multi", heats: 4 });
+ok(r.status === 200, "multiple rounds chosen with 4 heats");
+r = await admin.req(`/admin/games/${gr.id}/greenred/setup`, { mode: "single" });
+ok(r.status === 409, "the mode can't be changed once it is set up");
+let gd = await grDetail();
+ok(gd.mode === "multi" && gd.heats === 4 && gd.rounds.length === 5 && gd.rounds.filter((x) => x.kind === "heat").length === 4 && gd.rounds[4].kind === "final", "4 heats and a final");
+ok(JSON.stringify(gd.points) === "[3,2,1]", "the final pays 3, 2 and 1 points");
+const [h1, h2, h3, h4, grFin] = gd.rounds.map((x) => x.id);
+const addTo = (org, round, ids) => org.req(`/admin/gr-rounds/${round}/players`, { userIds: ids.map((i) => users[i].id) });
+const inRound = async (who, round) => (await grDetail(who)).rounds.find((x) => x.id === round).entries.length;
 
-// finish times
-const times = [[users[0], 14.2], [users[1], 11.5], [users[2], 12.8], [users[3], 13.1], [users[4], 20]];
-for (const [u, s] of times) {
-  r = await admin.req(`/admin/games/${gr.id}/finish`, { userId: u.id, seconds: s });
-  if (r.status !== 200) ok(false, "finish " + s);
+// three organisers add players at the same moment
+let rs = await Promise.all([addTo(oA, h1, [0]), addTo(oB, h1, [1]), addTo(oC, h1, [2])]);
+ok(rs.every((x) => x.status === 200), "3 organisers add 3 players to Heat 1 at the same moment: all saved");
+const counts = await Promise.all([oA, oB, oC, admin].map((who) => inRound(who, h1)));
+ok(counts.every((n) => n === 3), "every organiser sees all 3 players (" + counts.join(", ") + ")");
+rs = await Promise.all([addTo(oA, h1, [0]), addTo(oB, h1, [0]), addTo(oC, h1, [0])]);
+ok(rs.every((x) => x.status === 200) && (await inRound(admin, h1)) === 3, "the same player added by 3 organisers at once is stored once");
+r = await addTo(oA, h2, [0]);
+ok(r.j.added === 0 && (await inRound(admin, h2)) === 0, "a player can be in only one heat");
+let pl = (await users[0].c.req("/pulse")).j;
+ok(pl.notifications.some((n) => /You're in/.test(n.title) && /Heat 1/.test(n.body) && /Terrace/.test(n.body)), "a player is alerted that they are in Heat 1, and where to go");
+ok(pl.live.every((x) => x.id !== gr.id || x.youIn === true) && (await users[0].c.req("/games")).j.games.find((x) => x.id === gr.id).youIn === true, "the game card shows 'you're in'");
+
+// the rest of the people, three organisers adding to different heats at once
+rs = await Promise.all([addTo(oA, h1, [3]), addTo(oB, h2, [4, 5, 6]), addTo(oC, h3, [7, 8, 9]), addTo(admin, h4, [10, 11])]);
+ok(rs.every((x) => x.status === 200), "organisers fill the other heats at the same time");
+const sizes = await Promise.all([h1, h2, h3, h4].map((x) => inRound(admin, x)));
+ok(JSON.stringify(sizes) === "[4,3,3,2]", "the heats hold 4, 3, 3 and 2 players (" + sizes.join(", ") + ")");
+
+// times in the heats
+const timeIn = (org, round, i, s) => org.req(`/admin/gr-rounds/${round}/time`, { userId: users[i].id, seconds: s });
+r = await timeIn(admin, h1, 5, 10);
+ok(r.status === 409, "someone from another heat can't be timed here");
+for (const [round, list] of [[h1, [[0, 14.2], [1, 11.5], [2, 12.8], [3, 20]]], [h2, [[4, 10.1], [5, 9.9], [6, 15]]], [h3, [[7, 13], [8, 12.5], [9, 12]]], [h4, [[10, 18], [11, 17]]]]) {
+  const org = [oA, oB, oC][round % 3];
+  for (const [i, sec] of list) await timeIn(org, round, i, sec);
 }
-r = await admin.req(`/admin/games/${gr.id}/finish`, { userId: users[5].id, seconds: 0 });
+r = await admin.req(`/admin/gr-rounds/${h1}/time`, { userId: users[0].id, seconds: 0 });
 ok(r.status === 400, "zero time rejected");
-r = await admin.req(`/admin/games/${gr.id}/finish`, { userId: users[5].id, seconds: "abc" });
-ok(r.status === 400, "non-number time rejected");
-det = (await admin.req(`/admin/games/${gr.id}`)).j;
-const order = det.greenred.finishers.map((f) => f.userId);
-ok(JSON.stringify(order) === JSON.stringify([users[1].id, users[2].id, users[3].id, users[0].id, users[4].id]), "finishers ordered fastest first (podium = top 3)");
-ok(det.greenred.finishers[0].seconds === 11.5 && det.greenred.finishers[0].rank === 1, "winner has the fastest time");
+ok((await admin.req(`/leaderboard/individual?game=${gr.id}`)).j.count === 0, "heat times don't count for the leaderboard");
+gd = await grDetail();
+ok(gd.rounds[4].entries.length === 0, "nobody is in the final until heats are finished");
 
-// teams are ranked by number of finishers (fastest finisher breaks a tie); positions pay 2 / 1 / 1 / 0, ties share
-const expectDelta = (finishers) => {
-  const stats = [1, 2, 3, 4].map((id) => {
-    const mine = finishers.filter((f) => f.team === id);
-    return { id, count: mine.length, best: mine.length ? Math.min(...mine.map((f) => f.seconds)) : Infinity };
-  });
-  stats.sort((a, b) => b.count - a.count || a.best - b.best || a.id - b.id);
-  const table = [2, 1, 1, 0], d = {};
-  let pos = 0, i = 0;
-  while (i < stats.length) {
-    let j = i;
-    while (j + 1 < stats.length && stats[j + 1].count === stats[i].count && stats[j + 1].best === stats[i].best) j++;
-    const size = j - i + 1;
-    const pts = table.slice(pos, pos + size).reduce((a, b) => a + b, 0) / size;
-    for (let k = i; k <= j; k++) d[stats[k].id] = pts;
-    pos += size;
-    i = j + 1;
-  }
-  return d;
-};
-const teamOf = (id) => users.find((u) => u.id === id).team;
-const checkPoints = async (finishers, label) => {
-  const now = Object.fromEntries((await users[0].c.req("/leaderboard/teams")).j.teams.map((t) => [t.teamId, t.total]));
-  const exp = expectDelta(finishers);
-  const good = [1, 2, 3, 4].every((t) => Math.abs((now[t] - teamsBefore[t]) - (exp[t] ?? 0)) < 0.01);
-  ok(good, label);
-};
-await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId), seconds: f.seconds })), "team points: teams ranked by finishers, paid 2 / 1 / 1 / 0");
+// finishing a heat sends its top 3 to the final
+r = await admin.req(`/admin/gr-rounds/${h1}/status`, { status: "done" });
+gd = await grDetail();
+ok(JSON.stringify(gd.rounds[4].entries.map((x) => x.userId).sort()) === JSON.stringify([users[0].id, users[1].id, users[2].id].sort()), "Heat 1 finished: its top 3 move to the final (the 4th doesn't)");
+pl = (await users[1].c.req("/pulse")).j;
+ok(pl.notifications.some((n) => /made the final/.test(n.title)), "a finalist is told they made the final");
+for (const h of [h2, h3, h4]) await admin.req(`/admin/gr-rounds/${h}/status`, { status: "done" });
+gd = await grDetail();
+ok(gd.rounds[4].entries.length === 11, "after all heats: 3 + 3 + 3 + 2 = 11 finalists");
 
-// re-record the winner with a slower time: someone else wins, no double counting
-await admin.req(`/admin/games/${gr.id}/finish`, { userId: users[1].id, seconds: 15 });
-det = (await admin.req(`/admin/games/${gr.id}`)).j;
-ok(det.greenred.finishers[0].userId === users[2].id && det.greenred.finishers.length === 5, "re-recording replaces the time and changes the winner");
-await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId), seconds: f.seconds })), "points recomputed after re-recording");
+// a corrected heat time changes who qualifies
+await timeIn(admin, h1, 3, 9.0);
+gd = await grDetail();
+const finalIds = gd.rounds[4].entries.map((x) => x.userId);
+ok(finalIds.includes(users[3].id) && !finalIds.includes(users[0].id) && finalIds.length === 11, "a corrected time moves the right people in and out of the final");
 
-// void the winner's time
-r = await admin.req(`/admin/results/${det.greenred.finishers[0].resultId}`, undefined, "DELETE");
-det = (await admin.req(`/admin/games/${gr.id}`)).j;
-ok(det.greenred.finishers.length === 4, "removing a time works");
-await checkPoints(det.greenred.finishers.map((f) => ({ team: teamOf(f.userId), seconds: f.seconds })), "points recomputed after removing a time");
+// the final: times decide the leaderboard
+const finalTimes = [[5, 8.9], [3, 9.0], [9, 9.4], [1, 9.8], [4, 10], [8, 10.2], [2, 10.5], [6, 11], [7, 11.5], [11, 12], [10, 13]];
+for (const [i, sec] of finalTimes) await timeIn([oA, oB, oC][i % 3], grFin, i, sec);
+gd = await grDetail();
+const podium = gd.rounds[4].entries.filter((x) => x.rank && x.rank <= 3).map((x) => x.userId);
+ok(JSON.stringify(podium) === JSON.stringify([users[5].id, users[3].id, users[9].id]), "final podium: 1st, 2nd and 3rd are the three fastest");
+let board = (await users[0].c.req(`/leaderboard/individual?game=${gr.id}`)).j;
+ok(board.count === 11 && board.top[0].rank === 1 && board.top[0].value === 8.9, "the leaderboard uses the final only (11 finalists, winner 8.9 s)");
+const overallAfter = await overall();
+const dlt = (i) => (overallAfter[users[i].id] ?? 0) - (overallBefore[users[i].id] ?? 0);
+ok(dlt(5) === 3 && dlt(3) === 2 && dlt(9) === 1 && dlt(1) === 0 && dlt(4) === 0, "points: 1st gets 3, 2nd gets 2, 3rd gets 1, everyone else 0");
+r = await admin.req(`/admin/gr-rounds/${h1}/status`, { status: "live" });
+ok(r.status === 409, "a heat can't be reopened once the final has times");
+r = await admin.req(`/admin/gr-rounds/${grFin}/players/${users[10].id}`, undefined, "DELETE");
+board = (await users[0].c.req(`/leaderboard/individual?game=${gr.id}`)).j;
+ok(r.status === 200 && board.count === 10, "removing a finalist takes them off the leaderboard");
 
-// someone who finishes without being added is added silently
-const before = (await users[11].c.req("/pulse")).j.notifications.length;
-await admin.req(`/admin/games/${gr.id}/finish`, { userId: users[11].id, seconds: 30 });
-const after = (await users[11].c.req("/pulse")).j.notifications.length;
-ok(after === before, "finisher added to roster without a new alert");
+// what players see
+const pv = (await users[2].c.req(`/games/${gr.id}`)).j.greenred;
+ok(pv.mine.includes(h1) && pv.mine.includes(grFin) && !JSON.stringify(pv).includes("Tester1 Person"), "players see their own rounds, and short names only");
+const tbAfter = Object.fromEntries((await users[0].c.req("/leaderboard/teams")).j.teams.map((x) => [x.teamId, x.total]));
+ok([1, 2, 3, 4].every((id) => tbAfter[id] === teamsBeforeGr[id]), "this game gives no team points any more");
 
-const gl = (await users[0].c.req("/pulse")).j;
-ok(Array.isArray(gl.live), "pulse works");
+// split everyone across heats in one tap
+r = await users[0].c.req(`/admin/games/${gr.id}/greenred/split`, {});
+ok(r.status === 403, "players can't split");
+r = await oA.req(`/admin/games/${gr.id}/greenred/reset`, {});
+ok(r.status === 403, "only admins can start the game over");
+r = await admin.req(`/admin/games/${gr.id}/greenred/reset`, {});
+ok(r.status === 200 && (await grDetail()).rounds.length === 0, "starting over clears the rounds");
+board = (await users[0].c.req(`/leaderboard/individual?game=${gr.id}`)).j;
+ok(board.count === 0, "...and the leaderboard entries");
+await admin.req(`/admin/games/${gr.id}/greenred/setup`, { mode: "multi", heats: 3 });
+r = await admin.req(`/admin/games/${gr.id}/greenred/split`, {});
+gd = await grDetail();
+const heatSizes = gd.rounds.filter((x) => x.kind === "heat").map((x) => x.entries.length);
+ok(r.status === 200 && heatSizes.reduce((a, b) => a + b, 0) === r.j.people && Math.max(...heatSizes) - Math.min(...heatSizes) <= 1, "everyone is shared evenly across the heats (" + heatSizes.join(", ") + ")");
+r = await admin.req(`/admin/games/${gr.id}/greenred/split`, {});
+ok(r.status === 409, "splitting again is refused while heats have players");
+
+// single round mode
+await admin.req(`/admin/games/${gr.id}/greenred/reset`, {});
+r = await admin.req(`/admin/games/${gr.id}/greenred/setup`, { mode: "single" });
+ok(r.status === 200, "single round chosen");
+gd = await grDetail();
+ok(gd.mode === "single" && gd.rounds.length === 1 && gd.rounds[0].kind === "final", "single mode is one round");
+const one = gd.rounds[0].id;
+rs = await Promise.all([addTo(oA, one, [0]), addTo(oB, one, [1]), addTo(oC, one, [2])]);
+ok(rs.every((x) => x.status === 200) && (await inRound(oC, one)) === 3, "3 organisers add players to the single round at once");
+await timeIn(oA, one, 0, 15);
+await timeIn(oB, one, 1, 11);
+await timeIn(oC, one, 2, 13);
+board = (await users[0].c.req(`/leaderboard/individual?game=${gr.id}`)).j;
+ok(board.count === 3 && board.top[0].value === 11 && board.top[1].value === 13 && board.top[2].value === 15, "single round: only the times are kept, fastest first");
+}
 
 // ---- screen
 const key = (await admin.req("/admin/screen-key")).j.url.split("key=")[1];

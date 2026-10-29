@@ -62,7 +62,7 @@ function Rules() {
 
   async function save() {
     const body: Record<string, string> = {};
-    for (const k of [...POINT_FIELDS.map((f) => f[0]), "rank_points", "team_rank_points", "shark_block_opponent", "individual_to_team"]) body[k] = form[k];
+    for (const k of [...POINT_FIELDS.map((f) => f[0]), "rank_points", "team_rank_points", "greenred_points", "shark_block_opponent", "individual_to_team"]) body[k] = form[k];
     try {
       await api("/admin/settings", { method: "PUT", body });
       toast("Saved");
@@ -88,6 +88,7 @@ function Rules() {
     );
   const rankText = listText(form.rank_points);
   const teamRankText = listText(form.team_rank_points);
+  const raceText = listText(form.greenred_points);
 
   return (
     <>
@@ -105,6 +106,10 @@ function Rules() {
               />
             </label>
           ))}
+          <label className="block">
+            <span className="text-sm">Green Light – Red Light final: points for 1st, 2nd and 3rd</span>
+            <input className={inputCls + " mt-1.5"} value={raceText} onChange={(e) => set("greenred_points", toList(e.target.value))} />
+          </label>
           <label className="block">
             <span className="text-sm">Team games: points for 1st, 2nd, 3rd and 4th place (Act It Out rounds, Green Light – Red Light)</span>
             <input className={inputCls + " mt-1.5"} value={teamRankText} onChange={(e) => set("team_rank_points", toList(e.target.value))} />

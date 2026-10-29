@@ -21,6 +21,18 @@ export async function notifyNewPlayers(env: Env, gameId: number) {
   ]);
 }
 
+// Tell everyone newly added to a Green Light – Red Light round, once.
+export async function notifyRoundEntries(env: Env, gameId: number, roundId: number, title: string, bodyStart: string) {
+  const g = await env.DB.prepare("SELECT location FROM games WHERE id = ?").bind(gameId).first<{ location: string }>();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO notifications (user_id, kind, title, body, game_id, created_at)
+       SELECT user_id, 'game_added', ?, ?, ?, ? FROM gr_entries WHERE round_id = ? AND notified = 0`,
+    ).bind(title, `${bodyStart} Head to the ${g?.location ?? "Terrace"}.`, gameId, now(), roundId),
+    env.DB.prepare("UPDATE gr_entries SET notified = 1 WHERE round_id = ? AND notified = 0").bind(roundId),
+  ]);
+}
+
 export async function notifyRemoved(env: Env, gameId: number, userId: number) {
   const g = await env.DB.prepare("SELECT name FROM games WHERE id = ?").bind(gameId).first<{ name: string }>();
   if (!g) return;
@@ -40,7 +52,10 @@ notifyRoutes.get("/pulse", async (c) => {
       .bind(user.id)
       .all(),
     c.env.DB.prepare("SELECT id, slug, name, kind, type, location FROM games WHERE status = 'live' ORDER BY sort").all<{ id: number }>(),
-    c.env.DB.prepare("SELECT game_id FROM game_players WHERE user_id = ?").bind(user.id).all<{ game_id: number }>(),
+    c.env.DB.prepare(
+      `SELECT game_id FROM game_players WHERE user_id = ?
+       UNION SELECT r.game_id FROM gr_entries e JOIN gr_rounds r ON r.id = e.round_id WHERE e.user_id = ?`,
+    ).bind(user.id, user.id).all<{ game_id: number }>(),
     c.env.DB.prepare(
       `SELECT p.id, p.match_id, p.team_id, p.item, p.ord, p.phase, p.phase_ends_at, m.stage, m.team_a, m.team_b, m.game_id, t.name AS team_name
          FROM pitches p JOIN matches m ON m.id = p.match_id JOIN teams t ON t.id = p.team_id

@@ -23,7 +23,12 @@ publicRoutes.get("/games", async (c) => {
     `SELECT id, slug, name, kind, type, result_type AS resultType, description, status, sort, location
        FROM games ${organiser ? "" : "WHERE status != 'draft'"} ORDER BY sort`,
   ).all<{ id: number }>();
-  const mine = await c.env.DB.prepare("SELECT game_id FROM game_players WHERE user_id = ?").bind(user.id).all<{ game_id: number }>();
+  const mine = await c.env.DB.prepare(
+    `SELECT game_id FROM game_players WHERE user_id = ?
+     UNION SELECT r.game_id FROM gr_entries e JOIN gr_rounds r ON r.id = e.round_id WHERE e.user_id = ?`,
+  )
+    .bind(user.id, user.id)
+    .all<{ game_id: number }>();
   const inGames = new Set(mine.results.map((r) => r.game_id));
   return c.json({ games: results.map((g) => ({ ...g, youIn: inGames.has(g.id) })) });
 });

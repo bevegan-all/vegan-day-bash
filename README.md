@@ -32,16 +32,20 @@ The app follows the phone's setting by default. The sun/moon button in the top b
 ### Game locations, player lists and alerts
 
 - Every game has a **location**, `Terrace` by default. An admin changes it on the game's control screen (Terrace, Hall, or any text). Players see it on the game cards and pages.
-- On **Green Light – Red Light**, organisers build a player list: add everyone, everyone checked in, a whole team, or individual people by scanning or searching. Each person added gets an alert saying they are in and where to go. Removing someone also alerts them.
-- Organisers then record each finisher's **time in seconds**. The fastest time wins, the top three show on a podium, and the teams are ranked from the finishers: the team with the most finishers is 1st, and the fastest finisher breaks a tie. See the points table below.
+- **Green Light – Red Light** is an **individual game**. Before it starts, organisers choose **Single round** or **Multiple rounds** (and how many heats, 1 to 8, default 4).
+  - **Single round:** organisers add the players and record each finisher's time in seconds. The times decide the leaderboard.
+  - **Multiple rounds:** there are heats and then a final. Each heat has its own list of players (or tap "Share everyone evenly across the heats"). When a heat is finished, its **top 3 go to the final automatically**. The final's times decide the leaderboard, and the top 3 are announced.
+  - **Points:** 1st 3, 2nd 2, 3rd 1 (changeable in Settings). Only the final, or the single round, counts for the leaderboard.
+  - Everyone added to a round gets an alert saying they are in and where to go. Several organisers can add people and record times at the same time. This game gives no team points.
 - Alerts show as a bell in the app and as a phone notification **while the app is open** (including in the background). A phone where the browser is completely closed will not get them, because that needs a push service, which is a bigger add-on.
 
 ### Points in every team game
 
 | Game | Points |
 |---|---|
-| Act It Out (each round), Green Light – Red Light | 1st place **2**, 2nd and 3rd **1** each, 4th **0**. Teams that tie share the points of the places they fill. |
+| Act It Out (each round) | 1st place **2**, 2nd and 3rd **1** each, 4th **0**. Teams that tie share the points of the places they fill. |
 | Meme Charades, Shark Tank | Semi-final winner **1**. The final winner gets **1 more**, so the champion ends with 2. |
+| Green Light – Red Light (individual) | Final: 1st **3**, 2nd **2**, 3rd **1** points to the player. |
 
 All of these can be changed in **Settings**.
 

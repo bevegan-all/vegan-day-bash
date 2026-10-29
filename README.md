@@ -80,6 +80,10 @@ Players see whose turn it is, who is acting, the clock, the live score and wheth
 
 Players see whose turn it is, the phase and a live countdown on Home and on the game page. The countdowns come from the server clock, so every phone shows the same time. The three durations are in **Settings** (set them to a few seconds to rehearse).
 
+### The public screen
+
+`/screen?key=…` shows every live game with one shared template (`src/web/stage.tsx`): a progress strip (semi-final 1, semi-final 2, final / heats and final / rounds 1 to 5), a headline saying what is happening now (who is preparing, pitching, acting, racing, voting), the clock, and the details underneath. Votes count up as they arrive, averages and scores count up with an animated bar, and when a team moves on or wins, a full-screen celebration (team, crown, confetti, scores) plays for 10 seconds. A page that is just opened never replays old celebrations.
+
 ### Checks
 
 `npm run typecheck` checks all the code. `scripts/flow-test.mjs` is an end-to-end API test. It needs a throwaway database, so run it like this and your own local data stays untouched:

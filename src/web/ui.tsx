@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { ChevronLeft, CircleUser, Gamepad2, House, Monitor, Moon, SlidersHorizontal, Sun, Trophy, X } from "lucide-react";
 import { teamById } from "../shared/teams";
@@ -231,8 +232,9 @@ export function ErrorBox({ message, onRetry }: { message: string; onRetry?: () =
   );
 }
 
+// Drawn on the page body, not inside whatever opened it: a blurred header would otherwise trap it
 export function Modal({ children, onClose, title }: { children: ReactNode; onClose: () => void; title: string }) {
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 backdrop-blur-[2px] sm:items-center" onClick={onClose}>
       <div
         role="dialog"
@@ -248,7 +250,8 @@ export function Modal({ children, onClose, title }: { children: ReactNode; onClo
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

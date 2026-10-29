@@ -91,26 +91,27 @@ export function PulseProvider({ children }: { children: ReactNode }) {
 // ---------- bell in the header ----------
 const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
+// One slim row for the Profile page: turn alerts on, then send a test
 export function AlertsToggle() {
   const [state, setState] = useState<AlertState>(alertState());
-  if (state === "unsupported") return <p className="text-sm text-muted">This browser can't show phone alerts. You will still see alerts inside the app.</p>;
-  if (state === "denied") return <p className="text-sm text-muted">Alerts are blocked. Allow notifications for this site in your browser settings to turn them on.</p>;
-  if (state === "granted") {
-    return (
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-muted">Phone alerts are on while the app is open.</p>
-        <Btn variant="secondary" size="sm" onClick={() => showSystemNotification("Test alert", "This is how game alerts will look.", "/", "test")}>
-          Send test
-        </Btn>
-      </div>
-    );
-  }
+  const note = state === "unsupported" ? "Not supported in this browser" : state === "denied" ? "Blocked: allow them in browser settings" : state === "granted" ? "On" : "Off";
   return (
-    <div className="flex items-center justify-between gap-3">
-      <p className="text-sm text-muted">Get an alert on your phone when you are added to a game.</p>
-      <Btn size="sm" onClick={async () => setState(await enableAlerts())}>
-        Turn on
-      </Btn>
+    <div className="flex items-center gap-3 rounded-xl border border-line bg-surface px-4 py-2.5">
+      <Bell size={18} className="shrink-0 text-muted" />
+      <div className="min-w-0 flex-1 leading-tight">
+        <div className="text-sm font-semibold">Phone alerts</div>
+        <div className={`truncate text-xs ${state === "granted" ? "text-accent" : "text-subtle"}`}>{note}</div>
+      </div>
+      {state === "default" && (
+        <Btn size="sm" onClick={async () => setState(await enableAlerts())}>
+          Turn on
+        </Btn>
+      )}
+      {state === "granted" && (
+        <Btn variant="secondary" size="sm" onClick={() => showSystemNotification("Test alert", "This is how game alerts will look.", "/", "test")}>
+          Test
+        </Btn>
+      )}
     </div>
   );
 }
@@ -177,9 +178,6 @@ export function NotificationBell() {
               ))}
             </ul>
           )}
-          <div className="mt-4 border-t border-line pt-4">
-            <AlertsToggle />
-          </div>
         </Modal>
       )}
     </>

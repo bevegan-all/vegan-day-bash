@@ -425,12 +425,7 @@ export function Profile() {
         </Card>
       </section>
 
-      <section>
-        <SectionLabel>Phone alerts</SectionLabel>
-        <Card>
-          <AlertsToggle />
-        </Card>
-      </section>
+      <AlertsToggle />
 
       <section>
         <SectionLabel>Appearance</SectionLabel>

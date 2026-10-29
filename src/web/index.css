@@ -118,6 +118,79 @@ textarea {
   animation: rise 0.2s ease-out;
 }
 
+/* Big-screen celebrations and reveals */
+@keyframes pop {
+  0% {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.pop {
+  animation: pop 0.7s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+@keyframes halo {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--halo);
+  }
+  50% {
+    box-shadow: 0 0 0 36px transparent;
+  }
+}
+.halo {
+  animation: halo 1.8s ease-out infinite;
+}
+@keyframes fall {
+  0% {
+    transform: translate3d(0, -10vh, 0) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(var(--drift, 0), 110vh, 0) rotate(720deg);
+    opacity: 0.9;
+  }
+}
+.confetti {
+  position: absolute;
+  top: 0;
+  width: 12px;
+  height: 20px;
+  border-radius: 2px;
+  animation: fall linear infinite;
+}
+@keyframes grow-up {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+.grow-up {
+  transform-origin: bottom;
+  animation: grow-up 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes slide-in {
+  from {
+    transform: translateY(18px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+.slide-in {
+  animation: slide-in 0.55s ease-out both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;

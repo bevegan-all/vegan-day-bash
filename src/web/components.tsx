@@ -52,8 +52,8 @@ export function Podium({ finishers, big }: { finishers: Finisher[]; big?: boolea
             <div className={`font-semibold text-subtle ${big ? "text-2xl" : "text-sm"}`}>–</div>
           )}
           <div
-            className={`mt-2 flex w-full items-start justify-center rounded-t-lg pt-2 font-semibold text-[#1c1505] ${big ? PODIUM[place].hBig : PODIUM[place].h} ${big ? "text-3xl" : "text-lg"}`}
-            style={{ background: f ? PODIUM[place].bg : "var(--sunken)", color: f ? undefined : "var(--subtle)" }}
+            className={`mt-2 flex w-full items-start justify-center rounded-t-lg pt-2 font-semibold text-[#1c1505] ${big ? "grow-up " + PODIUM[place].hBig : PODIUM[place].h} ${big ? "text-3xl" : "text-lg"}`}
+            style={{ background: f ? PODIUM[place].bg : "var(--sunken)", color: f ? undefined : "var(--subtle)", animationDelay: big ? `${(4 - place) * 0.25}s` : undefined }}
           >
             {place}
           </div>

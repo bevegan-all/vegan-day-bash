@@ -723,7 +723,6 @@ function TurnPanel({
           </div>
 
           <div>
-            <div className="mb-1.5 text-sm font-medium text-muted">Who is acting? (optional, shown to everyone)</div>
             <div className="flex flex-wrap items-center gap-2">
               {players.map((p) => (
                 <span key={p.id} className="flex items-center gap-1 rounded-full bg-sunken py-1 pl-3 pr-1 text-sm font-medium">
@@ -734,8 +733,8 @@ function TurnPanel({
                 </span>
               ))}
               {players.length < 3 && (
-                <Btn variant="secondary" size="sm" onClick={() => setPicking(true)}>
-                  <ScanLine size={16} /> Add players
+                <Btn variant="ghost" size="sm" onClick={() => setPicking(true)}>
+                  <ScanLine size={16} /> {players.length ? "Add another player" : "Note who is acting (optional)"}
                 </Btn>
               )}
             </div>
